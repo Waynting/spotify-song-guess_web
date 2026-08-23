@@ -49,6 +49,31 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.7.3",
+    date: "2026-08-23",
+    headline:
+      "When the site cannot load new playlists, the notice now tells you why, says sorry, and points you at the source if you would rather not wait.",
+    headlineZh:
+      "當網站載入不了新歌單的時候，公告現在會告訴你原因、跟你說聲抱歉，如果你不想等，也會告訴你可以去哪裡自己架一站。",
+    changes: [
+      {
+        kind: "better",
+        text: "The notice says that GuessSong is free, and that Spotify's rules leave no way to buy a bigger allowance. It used to say only that the allowance was gone, which reads either as nobody looking after the site or as something money would fix. Neither is true, and it says sorry for it.",
+        textZh: "公告會說明 GuessSong 是免費的，而且 Spotify 的規則沒有留給我們加購額度的辦法。以前它只說額度用完了 —— 那讀起來要嘛像是沒人在管這個網站，要嘛像是花錢就能解決，兩個都不是真的。現在它也會為此道歉。",
+      },
+      {
+        kind: "new",
+        text: "The notice now has a link to the source code. GuessSong is open source, so anyone who would rather not share one allowance with everybody else can run their own copy on their own Spotify account.",
+        textZh: "公告上現在有一個原始碼的連結。GuessSong 是開源的，所以不想跟其他人共用同一份額度的人，可以用自己的 Spotify 帳號架一站自己跑。",
+      },
+      {
+        kind: "fixed",
+        text: "On a small phone the notice can be scrolled. The message got longer, and the page behind it is locked while it is open, so the last line used to be out of reach.",
+        textZh: "在螢幕比較小的手機上，公告現在可以捲動。訊息變長了，而公告開著的時候後面的頁面是鎖住的，所以以前最後一行會看不到。",
+      },
+    ],
+  },
+  {
     version: "1.7.2",
     date: "2026-08-23",
     headline:

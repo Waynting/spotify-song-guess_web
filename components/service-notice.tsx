@@ -23,6 +23,7 @@ import { errorMessage, type ErrorLocale } from "@/lib/error-messages";
 import { useErrorLocale } from "@/lib/use-error-locale";
 import {
   NOTICE_DISMISS_KEY,
+  SELF_HOST_URL,
   SERVICE_NOTICE_UI,
   shouldShowNotice,
 } from "@/lib/service-notice";
@@ -166,8 +167,28 @@ export function ServiceNotice({ locale: forced }: ServiceNoticeProps = {}) {
         animation: "sn-fade 0.15s ease-out",
       }}
     >
+      {/*
+        The body is several sentences — it has to say who refused, that the app
+        is free, and where to go instead — and `document.body` is
+        overflow:hidden while this is open, so a card taller than the phone
+        would be unreadable with no way to scroll it. `.sn-card` sets the cap.
+
+        It carries two `max-height` declarations, not one: `dvh` is the correct
+        unit (it excludes the mobile URL bar) but Safari below 15.4 drops the
+        whole declaration, which would silently restore the unscrollable card
+        on exactly the old phones most likely to be short. The `vh` line is the
+        floor; browsers that understand `dvh` take the second. It lives in the
+        stylesheet rather than the inline style because a React style object
+        cannot hold two values for one property.
+      */}
       <style>{`
         @keyframes sn-fade { from { opacity: 0 } to { opacity: 1 } }
+        /* See the note above <style> — two declarations on purpose. */
+        .sn-card {
+          max-height: calc(100vh - 32px);
+          max-height: calc(100dvh - 32px);
+          overflow-y: auto;
+        }
         .sn-dismiss {
           background: #1DB954;
           color: #06210f;
@@ -180,9 +201,26 @@ export function ServiceNotice({ locale: forced }: ServiceNoticeProps = {}) {
           cursor: pointer;
         }
         .sn-dismiss:hover { background: #24d363 }
+        .sn-repo {
+          color: #9a9a9a;
+          font-family: Outfit, system-ui, sans-serif;
+          font-size: 14px;
+          text-decoration: none;
+          border-bottom: 1px solid #3a3a3a;
+          padding-bottom: 1px;
+        }
+        .sn-repo:hover { color: #1DB954; border-bottom-color: #1DB954 }
+        /* This dialog traps Tab between the button and this link, so keyboard
+           focus lands here by design and needs to be visible on #1a1a1a. */
+        .sn-repo:focus-visible {
+          outline: 2px solid #1DB954;
+          outline-offset: 3px;
+          border-radius: 3px;
+        }
       `}</style>
       <div
         ref={dialogRef}
+        className="sn-card"
         role="alertdialog"
         aria-modal="true"
         aria-labelledby="sn-title"
@@ -225,14 +263,37 @@ export function ServiceNotice({ locale: forced }: ServiceNoticeProps = {}) {
         >
           {body}
         </p>
-        <button
-          type="button"
-          className="sn-dismiss"
-          onClick={close}
-          aria-label={ui.close}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "18px",
+            flexWrap: "wrap",
+          }}
         >
-          {ui.dismiss}
-        </button>
+          <button
+            type="button"
+            className="sn-dismiss"
+            onClick={close}
+            aria-label={ui.close}
+          >
+            {ui.dismiss}
+          </button>
+          {/*
+            The one thing a host can actually do about this tonight. The
+            message above says the app is free and that the quota is not for
+            sale at this size, which is true and leaves the reader with
+            nowhere to go; this is the somewhere.
+          */}
+          <a
+            className="sn-repo"
+            href={SELF_HOST_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {ui.repo} →
+          </a>
+        </div>
       </div>
     </div>,
     document.body

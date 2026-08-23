@@ -36,18 +36,32 @@ export function shouldShowNotice(
   return status.code !== dismissedCode;
 }
 
+/**
+ * Where a host who does not want to wait can go instead.
+ *
+ * The message this notice renders says the app is free and that Spotify's
+ * quota is not something a project this size can buy more of. That is an
+ * honest account and a dead end, so the notice ends on the one door that is
+ * actually open: the source, and your own Spotify credentials. It is a link
+ * rather than a URL inside the sentence because the same sentence is also
+ * rendered as plain text under the Start button, where nothing is clickable.
+ */
+export const SELF_HOST_URL = "https://github.com/Waynting/GuessSong";
+
 export const SERVICE_NOTICE_UI: Record<
   ErrorLocale,
-  { title: string; dismiss: string; close: string }
+  { title: string; dismiss: string; close: string; repo: string }
 > = {
   en: {
     title: "New playlists aren't loading right now",
     dismiss: "Got it",
     close: "Dismiss notice",
+    repo: "Run your own copy",
   },
   zh: {
     title: "現在新歌單載入不了",
     dismiss: "知道了",
     close: "關閉公告",
+    repo: "自己架一站",
   },
 };

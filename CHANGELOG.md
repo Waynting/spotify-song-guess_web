@@ -5,6 +5,76 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.3] - 2026-08-23
+
+1.7.2 put the notice in front of the host before they paste a link. It said the
+site was refusing new playlists, it said the Spotify quota was shared, and it
+stopped there. A host who reads only that is left with two readings, and both
+are wrong: that nobody is looking after the site, or that somebody could fix
+this by paying for it.
+
+Neither is true. GuessSong is free, and Spotify's quota is not something a
+project this size can buy more of. So the notice now says that, apologises for
+it, and ends on the one door that is actually open.
+
+### Changed
+
+- **`spotify_quota_exhausted` and `spotify_daily_budget_spent`**
+  (`lib/error-messages.ts`), in both languages. Each now opens with an apology,
+  says the app is free and shares one Spotify quota, says Spotify's policy
+  leaves no way to buy a bigger one, and closes by pointing at the source for
+  anyone who would rather run their own copy on their own credentials.
+
+  Everything 1.7.2 pinned still holds and is still tested: no `{seconds}` on
+  either code, neither blames the host's playlist, both still end on "your
+  playlist URL is fine" / 「你的歌單連結沒有問題」, and neither joins
+  `isDeterministicPlaylistFailure`. `tests/error-messages.test.ts` adds the new
+  half — apology, "free", and "open source" present in *both* languages,
+  because a translation is exactly where the awkward second half of a sentence
+  gets dropped.
+
+  They remain two codes differing in their first sentence, which is the only
+  sentence that should differ: one is Spotify refusing us, the other is us
+  refusing ourselves before Spotify does.
+
+- **The notice ends on a link, not a sentence** (`components/service-notice.tsx`;
+  `SELF_HOST_URL` and `SERVICE_NOTICE_UI.repo` in `lib/service-notice.ts`).
+  "You can run your own copy" is only a remedy if it is reachable. The URL is
+  chrome on the popup rather than prose inside the message, because the same
+  string is also rendered as plain text under the Start button where nothing is
+  clickable. The Chinese label carries no ASCII, which `tests/service-notice.test.ts`
+  now pins for `repo` alongside the other three strings.
+
+### Fixed
+
+- **The dialog scrolls when it is taller than the phone.** The body roughly
+  doubled in length, and `document.body` is `overflow: hidden` for as long as
+  the notice is open — so on a short viewport the end of the message, including
+  the line saying the host's playlist is fine, was unreachable. `.sn-card` caps
+  the height and scrolls.
+
+  It carries `max-height: calc(100vh - 32px)` and then the same in `dvh`, in
+  that order. `dvh` is the correct unit because it excludes the mobile URL bar,
+  and Safari below 15.4 drops the whole declaration rather than the one value —
+  which would have silently restored the unscrollable card on exactly the old
+  phones most likely to be short. Two declarations is also why this moved out of
+  the inline style: a React style object cannot hold two values for one property.
+
+- **The self-host link has a focus ring.** The dialog traps Tab, and until now
+  there was only one thing to trap. A second focusable with no `:focus-visible`
+  style is invisible to a keyboard on `#1a1a1a`.
+
+### Known gaps
+
+- The repo URL is now a fifth hand-written copy of the same literal
+  (`app/about`, `app/contact`, `app/zh`, `components/site-footer`, and now
+  `lib/service-notice`). Following the existing convention was chosen over
+  centralising during a copy change; a shared module that all five import is the
+  obvious follow-up, and it touches four files that have nothing else to do with
+  this release.
+- The link's touch target is about 20px tall, next to a 44px button. Fine on a
+  desktop, tight on a phone, and left alone rather than redesigned here.
+
 ## [1.7.2] - 2026-08-23
 
 1.7.1 made the refusal message honest. It did not make it *early*: the only way
