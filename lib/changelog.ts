@@ -49,6 +49,36 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.7.1",
+    date: "2026-08-23",
+    headline:
+      "Spotify cut the whole site off for a day, so loading a playlist now costs half as much and the message you get when it happens is honest.",
+    headlineZh:
+      "Spotify 一度把整個網站擋了一整天，所以現在載入歌單的成本少了一半，真的被擋的時候訊息也不再騙人。",
+    changes: [
+      {
+        kind: "fixed",
+        text: "Loading a playlist asks Spotify for half as much. Every game used to send two requests where one would do, which is a large part of why the shared allowance ran out in the first place.",
+        textZh: "載入歌單時跟 Spotify 要的東西少了一半。以前每一場遊戲都送出兩個請求，其實一個就夠了 —— 那正是共用額度會被用完的一大原因。",
+      },
+      {
+        kind: "better",
+        text: "A playlist you used last night loads instantly tonight. They used to be forgotten after six hours, which is just short enough to miss the gap between two parties.",
+        textZh: "昨晚用過的歌單，今晚一秒就開得起來。以前只記住六個小時，而六個小時剛好差一點，接不上兩場派對之間的間隔。",
+      },
+      {
+        kind: "fixed",
+        text: "When Spotify does refuse everyone, you are told what actually happened instead of a countdown. The old message promised a wait of a few minutes even when the real answer was the next day, so you would come back and be told the same thing again.",
+        textZh: "當 Spotify 真的把所有人擋下來時，你看到的是實話，而不是一個倒數。以前的訊息說再等幾分鐘就好，就算實際上要等到隔天 —— 於是你回來以後，只會再被告知一次同樣的幾分鐘。",
+      },
+      {
+        kind: "better",
+        text: "Playlists already loaded keep working while that is going on, so a party in the middle of a game is not interrupted by someone else starting one.",
+        textZh: "在那期間，已經載入過的歌單照常能玩 —— 玩到一半的派對不會因為別人剛好要開一場而被打斷。",
+      },
+    ],
+  },
+  {
     version: "1.7.0",
     date: "2026-08-21",
     headline:

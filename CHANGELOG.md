@@ -5,6 +5,120 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.1] - 2026-08-23
+
+Spotify stopped answering. Not the rolling-window throttle the code was built
+for — the daily app quota, spent:
+
+```
+HTTP/2 429
+retry-after: 52531
+{"error":{"status":429,"message":"Too many requests","reason":"QUOTA_EXCEEDED"}}
+```
+
+14.6 hours, and reproducible from a laptop on a home IP with the same client
+id, which rules out Vercel's shared egress and names the client id as the thing
+being throttled. `lib/playlist-cache.ts` clamped that to 900 seconds, and the
+clamp was doing two jobs it should never have shared: how long the site backs
+off, and what the host is told. Against a 14.6-hour refusal it produced a host
+reading "try again in about 780s", waiting thirteen minutes, and being told 780
+seconds again — a countdown the app had no way to honour — while one host every
+quarter of an hour was spent as a canary re-probing a quota with hours to run.
+
+Why the quota went in the first place is two things, both measurable. The
+Spotify dashboard's Endpoints panel showed ~1.75k calls/day to
+`/v1/playlists/<id>` against ~2.1k to `/v1/playlists/<id>/tracks`. A ratio of
+1.2 pages per playlist means the great majority of playlists fit in one page —
+so the metadata call was very nearly pure waste, about 45% of every request the
+site made. `GET /playlists/{id}` returns the first 100 tracks embedded in its
+own reply; `SpotifyPlaylist` in `lib/spotify.ts` has *declared* `tracks.items`
+since the file was written. The app parsed that page, dropped it, and spent a
+second request on `/tracks?offset=0` fetching it again.
+
+The other half is the cache. `playlist:stats:*` for 2026-08-22: 1,303 hits
+against 2,152 misses, and 413 of those hits were replayed 404s — a real hit
+rate of 890/3455, 26%. Only 406 warm keys existed at any moment because
+`HIT_TTL_SECONDS` was six hours and parties are nightly, so a playlist first
+loaded at 8pm was cold again by 8pm the next day. Neither number was visible
+anywhere: `getCacheStats()` had them the whole time and nothing called it.
+
+### Changed
+
+- **`lib/spotify.ts`: the metadata call and page zero are one request.**
+  `fetchPlaylistHead` asks `GET /playlists/{id}?fields=id,name,tracks(...)` and
+  returns the name *and* the first page; `fetchPlaylistTracks` now takes that
+  page instead of fetching it, and starts at page two. Saves exactly one
+  upstream call on every cold load — for a sub-100-track playlist that is 2
+  calls down to 1.
+- **The `Promise.all` and its `AbortController` are gone.** They existed
+  because the metadata call and page zero were separate requests for
+  overlapping data: `Promise.all` settles on the first rejection while the
+  losing half keeps paginating against Spotify long after the response has gone
+  out. Merging the two deletes the failure mode instead of managing it — a
+  failed head now costs zero track pages, which `tests/spotify.test.ts` pins.
+- **`TrackPage.next` became `nextOffset` (plus `rawCount`).** The caller only
+  ever asked `next` "is there another page" and then derived the offset from
+  `TRACKS_PAGE_LIMIT` — arithmetic that breaks on a page of a different size,
+  which is exactly what the embedded first page can be, since there is no
+  `limit` to send it. `rawCount` is the page's entry count before nulls are
+  filtered, and it is what separates "the page was absent" from "the page was
+  100 local files".
+- **`HIT_TTL_SECONDS` 6h → 24h.** A day covers tonight-to-tomorrow-night, which
+  is the interval that actually repeats here. The cost is that a host who adds
+  songs this afternoon may not see them tonight.
+- **`MAX_COOLDOWN_SECONDS` 15min → 24h, and the clamp split in two.** The
+  honest figure is stored and reported; the old 15 minutes survives as
+  `COOLDOWN_PROBE_SECONDS`, which is now the TTL on the key rather than the
+  value in it. The gate reopens on schedule, one refused request re-reads a
+  fresh `Retry-After` and rewrites the cooldown, and no single bad header can
+  park the site for a day.
+- **The in-order pagination loop is bounded by `MAX_TRACK_PAGES`, not only by
+  `tracks.length`.** Filtered-out entries never grow `tracks`, so on a playlist
+  made of local files the only brake left was upstream telling the truth about
+  `next`. The 5-call ceiling that comment claims is now enforced.
+
+### Added
+
+- **`spotify_quota_exhausted`** in `lib/error-messages.ts`, deliberately with no
+  `{seconds}`. Above `COUNTDOWN_MAX_SECONDS` (10 min) a countdown stops being
+  information and becomes a promise; the host gets the facts and the note that
+  already-loaded playlists still work. It joins both throttling invariants in
+  `tests/error-messages.test.ts` — never blames the playlist, never
+  deterministic. `retryAfterSeconds` stays honest, because that is a header.
+- **A fallback for a projection that stops working.** If `PLAYLIST_FIELDS` ever
+  stops naming the embedded page the way Spotify expects, the reply comes back
+  without `items` and no error — every playlist on the site would quietly load
+  as empty. `rawCount === 0 && total > 0` catches exactly that, re-fetches page
+  zero, and logs which constant to look at. This could not be verified against
+  the live API while writing it, because the quota was spent; the fallback is
+  the answer to that, not a substitute for checking.
+- **`npm run stats` prints the cache table.** Hits, misses and hit rate for the
+  playlist and preview caches, with replayed 404s subtracted out of the first
+  and `unavailable` broken out of the second — the two subsets that make a
+  healthy-looking number and an unhealthy situation read identically. Read by
+  constructed key rather than by SCAN: `MATCH` still walks the whole instance,
+  and `lib/preview-cache.ts` holds 200k+ keys, so two more namespace scans would
+  have been ~400 extra REST round-trips on the one report this project asks
+  people to run every session. Both kind sets are closed TypeScript unions, so
+  mirroring them is mirroring a compile-checked set.
+
+### Known gaps
+
+- **The `fields` projection is unverified against the live API.** Spotify was
+  still refusing every request when this shipped. `fields=name,tracks(total)`
+  was confirmed working before the quota went; the `items(track(...))` half was
+  not. The fallback above covers it, and the first cold load after the quota
+  resets is the real check.
+- **`SPOTIFY_MAX_LOADS_PER_MINUTE` is the wrong instrument for a daily quota.**
+  A per-minute ceiling cannot stop an evening peak from eating the whole day's
+  allowance by 9pm. A daily budget is the shape that matches; this release did
+  not add one.
+- **Extended Quota Mode has not been applied for.** At ~1,660 games/day the app
+  has outgrown Spotify's development-mode allowance, and no amount of caching
+  changes that ceiling — it only moves the date.
+- **`startCooldown` still does not log the `Retry-After` it was handed.** The
+  52531 above came from a manual `curl`; nothing in the logs would have said it.
+
 ## [1.7.0] - 2026-08-21
 
 AdSense refused the site under "Low value content" (缺乏價值的內容). This release
