@@ -237,6 +237,16 @@ describe("404 negative caching", () => {
     expect(missTtl).toBeLessThan(hitTtl);
   });
 
+  it("holds a loaded playlist long enough to cover tomorrow night", async () => {
+    await loadPlaylist(URL_A);
+
+    // Parties are nightly, so six hours meant a playlist first loaded at 8pm
+    // was cold again by 8pm the next day: 406 warm keys against 2,152 cold
+    // loads in a day, every miss spending the app's shared Spotify quota.
+    const write = kv.writes.find((w) => w.key.startsWith("playlist:"))!;
+    expect(write.ttlSeconds).toBe(24 * 60 * 60);
+  });
+
   it("does not cache a 5xx — that is Spotify's problem, not the playlist's", async () => {
     upstream().mockRejectedValue(new spotify.SpotifyApiError("playlist_load_failed", 503));
 
@@ -271,14 +281,65 @@ describe("429 cooldown", () => {
     await expect(loadPlaylist(URL_A)).resolves.toMatchObject({ totalTracks: 2 });
   });
 
-  it("clamps a huge Retry-After to a bearable wait", async () => {
+  it("stores the real wait but lets the key expire early enough to re-check", async () => {
+    // Production, 2026-08-23: `retry-after: 52531`, `reason: QUOTA_EXCEEDED`.
+    // The two numbers here used to be one, and the single number got both
+    // jobs wrong — a 15-minute clamp told the host a wait the app could not
+    // honour, and re-opened the gate on a quota that had 14 hours left to run.
+    const before = Date.now();
     upstream().mockRejectedValueOnce(
-      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 86400 })
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 52531 })
     );
     await expect(loadPlaylist(URL_A)).rejects.toThrow();
 
-    const cooldown = kv.writes.find((w) => w.key === "spotify:cooldown");
-    expect(cooldown!.ttlSeconds).toBeLessThanOrEqual(15 * 60);
+    const cooldown = kv.writes.find((w) => w.key === "spotify:cooldown")!;
+
+    // The value is what the host is told: the truth, hours and all.
+    const until = (cooldown.value as { until: number }).until;
+    expect(until - before).toBeGreaterThanOrEqual(52530 * 1000);
+
+    // The TTL is when we go and ask again, so one bad header cannot lock the
+    // site out for a day with no way back.
+    expect(cooldown.ttlSeconds).toBe(15 * 60);
+  });
+
+  it("drops the countdown once the wait is measured in hours", async () => {
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 52531 })
+    );
+    const err = await loadPlaylist(URL_A).catch((e) => e);
+
+    // "Try again in about 52531s" is not a wait, it is a dismissal. The host
+    // gets told what is actually true instead, and the header keeps the number.
+    expect(err.code).toBe("spotify_quota_exhausted");
+    expect(err.params).toBeUndefined();
+    expect(err.retryAfterSeconds).toBeGreaterThan(52000);
+  });
+
+  it("keeps the countdown when the wait is short enough to sit through", async () => {
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 45 })
+    );
+    const err = await loadPlaylist(URL_A).catch((e) => e);
+
+    expect(err.code).toBe("spotify_cooldown");
+    expect(err.params).toMatchObject({ seconds: 45 });
+  });
+
+  it("caps an absurd Retry-After at a day rather than trusting it", async () => {
+    // The stored value is what the host is told, so it follows Spotify — but
+    // only so far. A malformed or hostile header must not be able to park every
+    // uncached playlist for a week; a day is past any real quota window.
+    const before = Date.now();
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 30 * 86400 })
+    );
+    await expect(loadPlaylist(URL_A)).rejects.toThrow();
+
+    const cooldown = kv.writes.find((w) => w.key === "spotify:cooldown")!;
+    const until = (cooldown.value as { until: number }).until;
+    expect(until - before).toBeLessThanOrEqual(24 * 60 * 60 * 1000 + 1000);
+    expect(until - before).toBeGreaterThan(23 * 60 * 60 * 1000);
   });
 
   it("applies a floor when Spotify sends no Retry-After at all", async () => {

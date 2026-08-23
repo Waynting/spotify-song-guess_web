@@ -48,10 +48,19 @@ const CACHE_VERSION = "v1";
 /**
  * Long enough that a party spends zero upstream requests after the first load
  * — including the host reloading, re-pasting, or every player in a room
- * submitting the same popular playlist — and short enough that a host who adds
- * songs mid-afternoon sees them tonight.
+ * submitting the same popular playlist.
+ *
+ * Six hours was too short, and the counters said so before the quota did.
+ * Parties are a nightly event: a playlist first loaded at 8pm is cold again by
+ * 8pm the next day, so the cache only ever held about a fifth of a day's
+ * playlists — 406 warm keys against 2,152 cold loads in a day, a 26% hit rate,
+ * and every one of those misses spending the app's shared Spotify quota. A day
+ * covers tonight-to-tomorrow-night, which is the interval that actually
+ * repeats here. The cost is that a host who adds songs this afternoon may not
+ * see them tonight; that is a worse trade at six hours than it looks, because
+ * the alternative it bought was the whole site being locked out of Spotify.
  */
-const HIT_TTL_SECONDS = 6 * 60 * 60;
+const HIT_TTL_SECONDS = 24 * 60 * 60;
 
 /**
  * Shorter, for playlists too big to read whole. Those are cached as a *random
@@ -94,13 +103,46 @@ const DEFAULT_GLOBAL_LOAD_LIMIT = 40;
 const BUDGET_KEY = "spotify:budget";
 
 /**
- * Spotify's Retry-After on QUOTA_EXCEEDED is sometimes enormous (hours) and
- * sometimes absent. Clamp both ends: never park the whole site for longer than
- * a party would wait, never hammer straight back into a spent quota either.
+ * Spotify's Retry-After on QUOTA_EXCEEDED is sometimes enormous and sometimes
+ * absent. Measured on 2026-08-23: `retry-after: 52531`, `reason:
+ * QUOTA_EXCEEDED` — 14.6 hours, because the exhausted thing is a daily app
+ * quota rather than a burst window.
+ *
+ * The old cap was 15 minutes, on the reasoning that the site should never be
+ * parked longer than a party would wait. That conflated two separate numbers.
+ * How long we back off is one; what we tell the host is the other, and the cap
+ * was silently deciding both. Against a 14.6-hour refusal it produced a host
+ * being told "try again in about 780s", waiting thirteen minutes, coming back,
+ * and being told 780s again — a countdown the app had no way to honour.
+ *
+ * So the honest figure is what gets stored and reported, and the 15 minutes
+ * survives as COOLDOWN_PROBE_SECONDS: the TTL on the key, not the value in it.
  */
 const MIN_COOLDOWN_SECONDS = 30;
-const MAX_COOLDOWN_SECONDS = 15 * 60;
+const MAX_COOLDOWN_SECONDS = 24 * 60 * 60;
 const DEFAULT_COOLDOWN_SECONDS = 60;
+
+/**
+ * How long the gate stays shut before one wave of requests is allowed upstream
+ * to find out whether Spotify has relented.
+ *
+ * The stored `until` can be hours away, and trusting it blindly would mean one
+ * bad Retry-After header locks every uncached playlist out for a day with no
+ * way back except deleting the key by hand. Expiring the *key* early instead
+ * costs one refused request per interval and is self-correcting: the probe's
+ * own 429 carries a fresh Retry-After, which rewrites the cooldown. Cheap
+ * against a daily quota, and the alternative is a foot-gun with a 24h fuse.
+ */
+const COOLDOWN_PROBE_SECONDS = 15 * 60;
+
+/**
+ * Above this, a countdown stops being information and becomes a promise.
+ *
+ * Ten minutes is roughly the point where "try again in Ns" reads as "wait,
+ * then it will work" rather than "this is a blip". Past it the host gets the
+ * quota message instead: same facts, no number to sit and watch.
+ */
+const COUNTDOWN_MAX_SECONDS = 10 * 60;
 
 export interface LoadedPlaylist {
   name: string;
@@ -189,7 +231,15 @@ async function startCooldown(retryAfterSeconds?: number): Promise<number> {
   const until = Date.now() + seconds * 1000;
   try {
     const store = await getKvStore();
-    await store.set(COOLDOWN_KEY, { until }, seconds);
+    // The value is honest, the TTL is short. See COOLDOWN_PROBE_SECONDS: every
+    // reader inside the window is told the real wait, and when the key expires
+    // one request goes and checks rather than the site staying parked on a
+    // number Spotify sent hours ago.
+    await store.set(
+      COOLDOWN_KEY,
+      { until },
+      Math.min(seconds, COOLDOWN_PROBE_SECONDS)
+    );
   } catch {
     // Best effort. Losing the cooldown costs us the coordinated backoff, not
     // correctness — each request still fails on its own 429.
@@ -299,7 +349,22 @@ export async function getCacheStats(): Promise<{
   return { hits, misses, negativeHits, hitRate: total > 0 ? hits / total : 0 };
 }
 
+/**
+ * The same fact, phrased for the wait the host is actually facing.
+ *
+ * A short cooldown is a blip and a countdown is the useful thing to say. A
+ * long one is the app's daily Spotify quota being gone, where a countdown is
+ * worse than no number at all — it invites the host to wait it out and press
+ * Start again into the same refusal. `retryAfterSeconds` stays honest in both
+ * cases; it is a header, not a sentence.
+ */
 function cooldownError(secondsRemaining: number): SpotifyApiError {
+  if (secondsRemaining > COUNTDOWN_MAX_SECONDS) {
+    return new SpotifyApiError("spotify_quota_exhausted", 429, {
+      retryAfterSeconds: secondsRemaining,
+    });
+  }
+
   return new SpotifyApiError("spotify_cooldown", 429, {
     retryAfterSeconds: secondsRemaining,
     params: { seconds: secondsRemaining },

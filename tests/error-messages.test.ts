@@ -73,7 +73,12 @@ describe("the message table", () => {
     // lib/spotify.ts's hazard, enforced in both languages: telling a throttled
     // host to check their playlist is public sends them back to editing a URL
     // that was always fine, and to retrying into a quota that is already gone.
-    for (const code of ["spotify_rate_limited", "spotify_cooldown", "spotify_busy"] as const) {
+    for (const code of [
+      "spotify_rate_limited",
+      "spotify_cooldown",
+      "spotify_quota_exhausted",
+      "spotify_busy",
+    ] as const) {
       expect(ERROR_MESSAGES[code].en).not.toMatch(/public/i);
       expect(ERROR_MESSAGES[code].zh).not.toMatch(/公開/);
       expect(ERROR_MESSAGES[code].en).toMatch(/your playlist URL is fine/i);
@@ -132,6 +137,7 @@ describe("isDeterministicPlaylistFailure", () => {
     for (const code of [
       "spotify_rate_limited",
       "spotify_cooldown",
+      "spotify_quota_exhausted",
       "spotify_busy",
       "rate_limited",
       "rate_limited_playlist",
