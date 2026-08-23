@@ -28,7 +28,7 @@
  * "broken" — same contract as app/api/preview/route.ts, which this follows.
  */
 
-import { dayBucket, getKvStore } from "@/lib/kv";
+import { dayBucket, getKvStore, hourBucket } from "@/lib/kv";
 import {
   getPlaylistWithTracks,
   isSpotifyEditorial,
@@ -37,6 +37,7 @@ import {
 } from "@/lib/spotify";
 import { stripTrackForStorage } from "@/lib/game-session";
 import type { AppErrorCode } from "@/lib/error-messages";
+import type { SpotifyServiceStatus } from "@/types/service-status";
 import type { Track } from "@/types";
 
 /**
@@ -101,6 +102,68 @@ const COOLDOWN_KEY = "spotify:cooldown";
 const GLOBAL_LOAD_WINDOW_SECONDS = 60;
 const DEFAULT_GLOBAL_LOAD_LIMIT = 40;
 const BUDGET_KEY = "spotify:budget";
+
+/**
+ * The same idea over the window that actually cuts us off.
+ *
+ * The per-minute gate above bounds a *burst*. It has never once fired in
+ * production — `spotify:budget` was observed at 0-1 all through the outage of
+ * 2026-08-23 — because it is guarding the wrong dimension. Spotify's refusal
+ * is a quota over roughly 24 hours, and a day's worth of traffic arriving at
+ * an average of one or two loads a minute passes a 40-a-minute ceiling
+ * without ever touching it. Both gates are needed: this one cannot stop a QR
+ * room's twelve simultaneous submits, and that one cannot stop an ordinary
+ * Sunday.
+ *
+ * **The window is rolling, not a calendar day, and that is not a detail.**
+ * Measured 2026-08-23: the app was refused after only 476 cold loads that day,
+ * because the previous evening's 2,152 were still inside Spotify's window, and
+ * the `Retry-After` pointed at 19:53 UTC rather than any midnight. A
+ * `dayBucket` counter reset at 00:00 UTC would have let a busy evening and the
+ * following busy morning each pass their own cap while together exceeding
+ * anything Spotify would allow — the exact failure it was added to prevent. So
+ * the counter is twenty-four hourly buckets, summed.
+ *
+ * The hourly buckets are also the only record of *when* the day is spent,
+ * which is the number the limit below has to be tuned against; `npm run stats`
+ * prints them.
+ */
+const DAILY_WINDOW_HOURS = 24;
+const HOUR_BUCKET_TTL_SECONDS = (DAILY_WINDOW_HOURS + 1) * 60 * 60;
+const HOUR_BUDGET_PREFIX = "spotify:budget:h";
+const HOUR_REFUSED_PREFIX = "spotify:budget:refused";
+
+/**
+ * Written when the window is spent, read by `getSpotifyServiceStatus`.
+ *
+ * The status route is a page-view-rate path and its whole cost claim is "one
+ * KV read". Summing twenty-four hourly buckets there to answer a yes/no would
+ * quietly make the notice more expensive than the gate it reports on, so the
+ * gate leaves a flag behind instead and the notice reads it in the same `mget`
+ * it already spends on the cooldown. TTL'd to the hour boundary, which is when
+ * the oldest bucket rolls out and the answer can change.
+ */
+const DAILY_SPENT_KEY = "spotify:budget:spent";
+
+/**
+ * Loads allowed upstream per rolling 24h, before we start refusing on
+ * Spotify's behalf.
+ *
+ * Every input to this number is an inference, so it is env-overridable and
+ * deliberately easy to find. What is known: Spotify does not publish a figure;
+ * the developer dashboard showed ~3,850 requests on the day the quota died;
+ * and since 1.7.1 a cold load costs ~1.2 requests rather than ~2.2. 2,000
+ * loads is therefore ~2,400 requests — under the wall by a margin, and just
+ * under a normal day's 2,152 cold loads, so it will occasionally refuse at the
+ * margin.
+ *
+ * That last part is the trade, stated plainly: refusing perhaps a hundred
+ * loads at the edge of a busy day is chosen over Spotify refusing *every*
+ * uncached load for 13.4 unconditional hours, which is what it did. Ours is a
+ * counter that rolls forward hour by hour; theirs is a penalty box with a
+ * fixed sentence.
+ */
+const DEFAULT_DAILY_LOAD_LIMIT = 2000;
 
 /**
  * Spotify's Retry-After on QUOTA_EXCEEDED is sometimes enormous and sometimes
@@ -272,6 +335,112 @@ async function claimGlobalBudget(): Promise<boolean> {
   }
 }
 
+function dailyLoadLimit(): number {
+  const configured = Number(process.env.SPOTIFY_MAX_LOADS_PER_DAY);
+  return Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_DAILY_LOAD_LIMIT;
+}
+
+/** The window, newest hour first, as keys under `prefix`. */
+function windowKeys(prefix: string, now: Date): string[] {
+  return Array.from({ length: DAILY_WINDOW_HOURS }, (_, i) =>
+    `${prefix}:${hourBucket(new Date(now.getTime() - i * 60 * 60 * 1000))}`
+  );
+}
+
+function sum(counts: Array<number | null>): number {
+  return counts.reduce<number>(
+    (total, n) => total + (typeof n === "number" && Number.isFinite(n) ? n : 0),
+    0
+  );
+}
+
+/**
+ * How long until the oldest hour in the window rolls out and its share of the
+ * budget comes back. Reported as a header, never rendered as a countdown —
+ * `spotify_daily_budget_spent` carries no `{seconds}`, for the reason
+ * lib/error-messages.ts gives.
+ */
+function secondsToNextHour(now: Date): number {
+  return Math.ceil((3600000 - (now.getTime() % 3600000)) / 1000);
+}
+
+/**
+ * Claims one load against the rolling 24h budget. Returns false when the
+ * window is spent.
+ *
+ * Read-then-increment rather than the increment-then-compare `claimGlobalBudget`
+ * uses, and the asymmetry is deliberate in both directions. A minute counter
+ * that counts its own refusals is self-healing — the window is gone in sixty
+ * seconds. A 24h one is not: refusals would inflate the very sum that caused
+ * them and hold the gate shut for a day, so only loads that are actually going
+ * upstream may touch it. The cost is that the check is not atomic against
+ * itself, so a burst can overshoot by however many requests are in flight at
+ * once — which the per-minute gate has already capped at `globalLoadLimit()`,
+ * a rounding error against a limit in the thousands.
+ *
+ * Fails *open*, like every other gate in this file: losing the safety net has
+ * to mean "back to how it was", not "nobody can play".
+ */
+async function claimDailyBudget(now: Date): Promise<boolean> {
+  try {
+    const store = await getKvStore();
+    const used = sum(await store.mget<number>(windowKeys(HOUR_BUDGET_PREFIX, now)));
+    if (used >= dailyLoadLimit()) {
+      // Counted, not logged per request: a spent window refuses every uncached
+      // load for as long as it lasts, and a log line each would be the noisiest
+      // output in the app on the day it is least useful to read.
+      const frees = secondsToNextHour(now);
+      await store.incr(
+        `${HOUR_REFUSED_PREFIX}:${hourBucket(now)}`,
+        HOUR_BUCKET_TTL_SECONDS
+      );
+      await store.set(DAILY_SPENT_KEY, { until: now.getTime() + frees * 1000 }, frees);
+      return false;
+    }
+    await store.incr(
+      `${HOUR_BUDGET_PREFIX}:${hourBucket(now)}`,
+      HOUR_BUCKET_TTL_SECONDS
+    );
+    return true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The rolling window as `npm run stats` reads it: the totals, and the shape
+ * of the day that produced them.
+ *
+ * `byHour` is oldest first. It answers the question the limit has to be tuned
+ * against and that nothing else in this repo can — not "how many loads did we
+ * spend" (`playlist:stats:*:miss` has that) but *when*, and therefore whether
+ * a cap is starving the evening to feed the afternoon.
+ */
+export async function getDailyBudgetStatus(now: Date = new Date()): Promise<{
+  used: number;
+  refused: number;
+  limit: number;
+  byHour: Array<{ hour: string; used: number; refused: number }>;
+}> {
+  const store = await getKvStore();
+  const usedKeys = windowKeys(HOUR_BUDGET_PREFIX, now);
+  const refusedKeys = windowKeys(HOUR_REFUSED_PREFIX, now);
+  const [used, refused] = await Promise.all([
+    store.mget<number>(usedKeys),
+    store.mget<number>(refusedKeys),
+  ]);
+  const byHour = usedKeys
+    .map((key, i) => ({
+      hour: key.slice(HOUR_BUDGET_PREFIX.length + 1),
+      used: sum([used[i]]),
+      refused: sum([refused[i]]),
+    }))
+    .reverse();
+  return { used: sum(used), refused: sum(refused), limit: dailyLoadLimit(), byHour };
+}
+
 /**
  * Hit/miss counters, bucketed by day and held for a week.
  *
@@ -372,6 +541,77 @@ function cooldownError(secondsRemaining: number): SpotifyApiError {
 }
 
 /**
+ * The cooldown as a fact a *page* can render, rather than an error a request
+ * had to hit to find out.
+ *
+ * Read-only, and deliberately outside the admission path: it claims no budget,
+ * records no miss and never goes upstream, so asking "is Spotify refusing us
+ * right now?" costs one KV read. That is what lets the site notice be live
+ * instead of a banner somebody has to remember to take down — the same key
+ * that parks the loads clears the notice when it expires.
+ *
+ * The code comes from `cooldownError`, not from a second threshold written
+ * here. A notice that said "throttled, back in ten minutes" while the host's
+ * own Start button said "the daily quota is gone" would be worse than no
+ * notice: two numbers for one fact, and the reader has to guess which is
+ * lying. One function decides, both surfaces read it.
+ */
+export type { SpotifyServiceStatus };
+
+const OPEN_STATUS: SpotifyServiceStatus = {
+  throttled: false,
+  code: null,
+  retryAfterSeconds: 0,
+};
+
+export async function getSpotifyServiceStatus(): Promise<SpotifyServiceStatus> {
+  // Both gates in one command, because there are two ways for the playlist
+  // path to be shut and a notice that knew about only one would be confidently
+  // wrong on the days the other fires — which, at a limit tuned just under a
+  // normal day, is not the rare case.
+  //
+  // Fail-open is the only defensible answer here, for the same reason
+  // lib/rate-limit.ts fails open: a KV outage must not put a "we are broken"
+  // banner on a site that is, as far as anyone can tell, fine.
+  let cooldown: { until: number } | null = null;
+  let spent: { until: number } | null = null;
+  try {
+    const store = await getKvStore();
+    [cooldown, spent] = await store.mget<{ until: number }>([
+      COOLDOWN_KEY,
+      DAILY_SPENT_KEY,
+    ]);
+  } catch {
+    return OPEN_STATUS;
+  }
+
+  const remainingOf = (entry: { until: number } | null): number =>
+    typeof entry?.until === "number" ? Math.ceil((entry.until - Date.now()) / 1000) : 0;
+
+  // Spotify's own refusal outranks ours. When both are live the host is facing
+  // the longer wait, and it is the one they can do nothing about.
+  const cooling = remainingOf(cooldown);
+  if (cooling > 0) {
+    return {
+      throttled: true,
+      code: cooldownError(cooling).code,
+      retryAfterSeconds: cooling,
+    };
+  }
+
+  const rationed = remainingOf(spent);
+  if (rationed > 0) {
+    return {
+      throttled: true,
+      code: "spotify_daily_budget_spent",
+      retryAfterSeconds: rationed,
+    };
+  }
+
+  return OPEN_STATUS;
+}
+
+/**
  * Coalesces concurrent loads of the same playlist within one lambda instance.
  *
  * Mixed Playlist Mode fires one request per contributor from a single click,
@@ -406,6 +646,17 @@ async function fetchAndCache(
   if (!(await claimGlobalBudget())) {
     throw new SpotifyApiError("spotify_busy", 429, {
       retryAfterSeconds: GLOBAL_LOAD_WINDOW_SECONDS,
+    });
+  }
+
+  // After the per-minute gate, never before it. A load refused for bursting
+  // has not gone upstream, so it must not spend a slot in the 24h window that
+  // takes a day to give one back; a load refused here has spent a minute slot
+  // instead, which is back in sixty seconds.
+  const now = new Date();
+  if (!(await claimDailyBudget(now))) {
+    throw new SpotifyApiError("spotify_daily_budget_spent", 429, {
+      retryAfterSeconds: secondsToNextHour(now),
     });
   }
 

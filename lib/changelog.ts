@@ -49,6 +49,41 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.7.2",
+    date: "2026-08-23",
+    headline:
+      "When Spotify has cut the site off, you now find out before you paste a playlist instead of after you press Start.",
+    headlineZh:
+      "當 Spotify 把整個網站擋下來的時候，現在你在貼上歌單之前就會知道，而不是按下開始以後才發現。",
+    changes: [
+      {
+        kind: "new",
+        text: "A notice on the way in when new playlists are not loading. Spotify limits this whole site as one, so when its daily allowance runs out nobody can load anything new — and until now the only way to discover that was to paste a link, press Start, and be refused.",
+        textZh: "當新歌單載入不了的時候，一進站就會看到公告。Spotify 是把整個網站當成一個來限制的，所以它的每日額度用完時，任何人都載不了新歌單 —— 而在此之前，唯一發現的方法是貼上連結、按下開始，然後被拒絕。",
+      },
+      {
+        kind: "better",
+        text: "The notice takes itself down. It reads the same signal the game does, so the moment Spotify starts answering again it is gone, without anybody having to remember to remove it.",
+        textZh: "這個公告會自己消失。它讀的是遊戲本身在讀的同一個訊號，所以 Spotify 一恢復回應它就不見了，不需要任何人記得回來把它拿掉。",
+      },
+      {
+        kind: "better",
+        text: "Players joining a mixed-playlist room see it too, since their submission goes through the same place. A room that quietly collected nothing was the worst version of this.",
+        textZh: "加入混合歌單房間的玩家也看得到，因為他們送出的歌單走的是同一條路。房間安安靜靜什麼都沒收到，是這件事最糟的版本。",
+      },
+      {
+        kind: "new",
+        text: "The site now paces how many new playlists it loads from Spotify across the day, instead of using the allowance up as fast as it arrives. On a busy day that means a handful of hosts are asked to wait at the edges — which is the trade for not having Spotify shut every new playlist out for thirteen hours at a time, which is what happened this week.",
+        textZh: "網站現在會把向 Spotify 載入新歌單的數量分配到一整天，而不是有多少就用多快。忙碌的日子裡，這代表少數幾位主持人會在邊緣被請稍等 —— 這是為了不要再被 Spotify 一次擋掉十三個小時所做的取捨，而那正是這週發生的事。",
+      },
+      {
+        kind: "better",
+        text: "Playlists you have already loaded keep working through all of this. Whatever is happening with Spotify, a party that has started is not interrupted by it.",
+        textZh: "在這整個過程中，你已經載入過的歌單都還是能用。不管 Spotify 那邊發生什麼事，已經開始的派對不會被打斷。",
+      },
+    ],
+  },
+  {
     version: "1.7.1",
     date: "2026-08-23",
     headline:

@@ -5,6 +5,179 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.2] - 2026-08-23
+
+1.7.1 made the refusal message honest. It did not make it *early*: the only way
+to learn the site was throttled was still to paste a playlist, press Start, and
+be turned away. On the morning this shipped Spotify was refusing the app with
+`retry-after: 48925` — 13.6 hours — and every host arriving at the setup page
+had to spend a request to find that out.
+
+A hand-written banner was the obvious answer and the wrong one. The quota
+clears on Spotify's schedule, usually overnight, so a static notice needs
+somebody to remember to take it down the next morning. Every mechanism in this
+codebase that has depended on somebody remembering has eventually failed
+silently, and a stale "the site is down" banner over a working site is a worse
+failure than the one it was put up for.
+
+So the notice reads the same KV key the admission gate writes.
+
+### Added
+
+- **`GET /api/status` and `getSpotifyServiceStatus()`** (`app/api/status/route.ts`,
+  `lib/playlist-cache.ts`). One KV read — an `mget` of `spotify:cooldown` and
+  `spotify:budget:spent`, the two gates below — with no upstream call, no budget
+  claimed and no miss recorded; it is outside the admission path entirely. Rate limited like every other route (`STATUS_LIMIT` 120 /
+  10 minutes), which is the two commands per call the limit is protecting.
+
+- **`components/service-notice.tsx`**, mounted on `/`, `/zh` and `/j/[code]` —
+  the three places somebody is about to hand the app a playlist URL. Deliberately
+  *not* on `/game`: a party mid-round already has its tracks and cannot act on
+  the news.
+
+  It takes an optional `locale`, the way `SiteFooter` and `ChangelogModal` do,
+  and `/zh` passes `"zh"`. Left to `useErrorLocale()` alone it renders the
+  *device* language — correct for an error, since one room is read by several
+  phones, and wrong for a page written natively in Chinese, where an English
+  string is a visible defect rather than a fallback. Caught by loading `/zh` in
+  an `en-US` browser, which is exactly what a Taiwanese host on an English
+  phone is.
+
+- **`lib/service-notice.ts`** holds `shouldShowNotice` and the UI strings, in
+  `lib/` for the reason `lib/song-count.ts` gives — the suite only reaches
+  `lib/`, and vitest cannot import a `.tsx` module here.
+
+### Notes on two things that are easy to undo
+
+- **The notice's code comes from `cooldownError`, not from a second threshold.**
+  `getSpotifyServiceStatus` builds the error and reads its `code` off it, so the
+  banner and the Start button are rendered from one decision. Re-deriving
+  "is this a blip or the daily quota" beside the component would let the two
+  surfaces disagree about the same fact, and the reader has no way to tell which
+  one is lying. `tests/playlist-cache.test.ts` asserts the two codes are equal.
+
+- **The dismissal is keyed by `AppErrorCode`, not a boolean.** A host who waved
+  away a 90-second `spotify_cooldown` has not been told that the day's quota is
+  now gone; collapsing those into one flag hides the more serious message behind
+  a dismissal of the lesser one. It is `sessionStorage`, not `localStorage`, for
+  the matching reason — the next visit may be a different outage.
+
+- **`types/service-status.ts` holds the wire type**, not `lib/playlist-cache.ts`,
+  so the browser bundle does not pull in `lib/kv.ts` and the Upstash client
+  through it. Same split, same reason, as `types/preview.ts`.
+
+- **Everything fails open.** `getSpotifyServiceStatus` returns "not throttled"
+  on a KV error and the client returns null on a failed fetch, so a cache outage
+  renders no notice rather than a false one.
+
+### The gate the notice reports on
+
+The other half of this release is what decides whether there is anything to put
+a notice about.
+
+`SPOTIFY_MAX_LOADS_PER_MINUTE` has never fired in production. `spotify:budget`
+was sampled at 0-1 throughout the morning of 2026-08-23 while the site was cut
+off, because a day's traffic arriving at one or two loads a minute passes a
+40-a-minute ceiling without ever touching it. It bounds a burst — twelve phones
+submitting into one QR room — and Spotify meters a day. Nothing bounded the
+dimension that actually cuts the app off.
+
+**The window is rolling, not a calendar day.** Measured the same morning: the
+app was refused after only 476 cold loads that day, because the previous
+evening's 2,152 were still inside Spotify's window, and the `Retry-After`
+resolved to 19:53 UTC rather than to any midnight. A `dayBucket` counter reset
+at 00:00 UTC would let a busy evening and the following busy morning each pass
+their own cap and together exceed anything Spotify allows — the exact failure it
+would have been added to prevent. So the counter is twenty-four hourly buckets,
+summed on every cold load.
+
+### Added
+
+- **`hourBucket()`** (`lib/kv.ts`), the same clock as `dayBucket` one resolution
+  finer, because a rolling window cannot be built out of calendar buckets.
+
+- **`claimDailyBudget()`** (`lib/playlist-cache.ts`) and
+  `SPOTIFY_MAX_LOADS_PER_DAY`, default **2000** loads per rolling 24h. Every
+  input to that number is an inference — Spotify publishes no figure; the
+  dashboard showed ~3,850 requests on the day the quota died; a cold load costs
+  ~1.2 requests since 1.7.1 — so 2,000 loads is ~2,400 requests, under the wall
+  by a margin and just under a normal day's 2,152 cold loads. It will therefore
+  refuse at the margin of a busy day, and that is the trade taken deliberately:
+  ours is a counter that rolls forward hour by hour, Spotify's is a penalty box
+  with a fixed 13.4-hour sentence.
+
+- **`spotify_daily_budget_spent`** (`lib/error-messages.ts`). Not a reuse of
+  `spotify_quota_exhausted`, whose text says Spotify has cut the site off. When
+  this gate fires Spotify has done nothing; we refused ourselves. Producing the
+  same screen from a false account of who decided is the same class of untruth
+  as the message that used to tell throttled hosts to check their playlist was
+  public, and it is excluded from `isDeterministicPlaylistFailure` for the same
+  reason every other throttling code is.
+
+- **`getDailyBudgetStatus()`**, and an hour-by-hour block in `npm run stats`.
+  The limit above is a guess, and the shape of the window is the only evidence
+  there is for tuning it — a day spent by lunchtime and a day spent at 11pm need
+  opposite changes. `playlist:stats:*:miss` already says how many loads were
+  spent; nothing said *when*.
+
+### Changed
+
+- **`getSpotifyServiceStatus` reads both gates**, in the one `mget` it was
+  already spending. There are two ways for the playlist path to be shut, and at
+  a limit tuned just under a normal day the second is not the rare case — a
+  notice blind to it would be confidently wrong on exactly the days it matters.
+  Spotify's own refusal outranks ours when both are live: it is the longer wait
+  and the one the host can do nothing about.
+
+### Notes on three more things that are easy to undo
+
+- **The daily gate runs after the per-minute one, never before.** A load turned
+  away for bursting has not gone upstream, so it must not spend a slot in a
+  window that takes a day to give one back; a load turned away by the daily gate
+  has spent a minute slot instead, which is back in sixty seconds. Reversing
+  them lets one burst permanently shrink the day.
+
+- **It reads, then increments — the opposite of `claimGlobalBudget`.** A minute
+  counter that counts its own refusals is self-healing; a 24h one is not.
+  Refusals would inflate the very sum that caused them and hold the gate shut
+  for a day, so only loads that are actually going upstream may touch
+  `spotify:budget:h:*`, and refusals are counted separately under
+  `spotify:budget:refused:*`. The cost is that the check is not atomic against
+  itself and a burst can overshoot by whatever is in flight — already capped by
+  the per-minute gate, and a rounding error against a limit in the thousands.
+
+- **`spotify:budget:spent` exists so the notice does not walk the window.**
+  `/api/status` is a page-view-rate path whose whole cost claim is one KV read;
+  summing twenty-four buckets there would make the notice more expensive than
+  the gate it reports on. The gate leaves a flag with a TTL to the hour
+  boundary, which is when the oldest bucket rolls out and the answer can change.
+
+### Known gaps
+
+- **This does not reserve anything for the evening.** It stops the 13.4-hour
+  lockout, but a busy afternoon can still fill the window before the parties
+  start. Real pacing needs the hourly distribution of traffic, which nothing in
+  this repo recorded before today; the `npm run stats` block added here is the
+  instrument for deciding it, and it needs a full day of data first.
+- **The 2,000 is a guess and should be re-derived from the dashboard.** The
+  honest measurement is the request count on a day the quota survives, against
+  one where it does not.
+- No analytics event. Whether the notice is seen or dismissed is currently
+  unmeasured, which is the failure mode this repo keeps rediscovering. Adding
+  one means extending the union in `lib/analytics.ts` and registering the params
+  as GA4 custom dimensions, and registration is not retroactive.
+- `startCooldown` still does not log the `Retry-After` it received, so the logs
+  cannot answer "how long did Spotify actually ask for" — diagnosing this on
+  2026-08-23 needed a hand-run `curl`.
+- The notice is a modal. If throttling turns out to be frequent rather than
+  exceptional, an inline banner on the setup form is the less intrusive shape.
+- `next dev` cannot render any page in this repo: `tailwind.config.ts:54` calls
+  `require("tailwindcss-animate")` under ESM and throws while postcss compiles
+  the CSS. API routes still serve, so it fails looking like a component bug —
+  no console error, `chrome-error://chromewebdata/`, dev server gone. Unrelated
+  to this release; `npm run build && npm run start` is the way to see UI until
+  it is fixed.
+
 ## [1.7.1] - 2026-08-23
 
 Spotify stopped answering. Not the rolling-window throttle the code was built

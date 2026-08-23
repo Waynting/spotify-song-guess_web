@@ -55,6 +55,7 @@ export type AppErrorCode =
   | "spotify_rate_limited"
   | "spotify_cooldown"
   | "spotify_quota_exhausted"
+  | "spotify_daily_budget_spent"
   | "spotify_busy"
   | "spotify_not_configured"
   | "spotify_auth_failed"
@@ -167,6 +168,22 @@ export const ERROR_MESSAGES: Record<AppErrorCode, Record<ErrorLocale, string>> =
   spotify_quota_exhausted: {
     en: "Spotify has cut the whole site off for today — every game here shares one quota with Spotify and it is spent. Playlists that have already been loaded still work; new ones come back once Spotify resets. Your playlist URL is fine.",
     zh: "Spotify 今天已經把整個網站擋下來了 — 這裡所有的遊戲共用同一份 Spotify 配額，而它用完了。已經載入過的歌單還是可以玩，新的歌單要等 Spotify 重置後才會恢復。你的歌單連結沒有問題。",
+  },
+  /**
+   * The self-imposed twin of `spotify_quota_exhausted`, and the distinction is
+   * worth a separate code because the two are not the same event: that one is
+   * Spotify refusing us, this one is us refusing ourselves *before* Spotify
+   * does. Saying "Spotify has cut the whole site off" when it has not would be
+   * the same class of untruth as telling a throttled host their playlist is
+   * private — technically it produces the same screen, and it teaches the
+   * reader something false about who decided.
+   *
+   * Carries no `{seconds}` for the reason above it: the wait is until enough
+   * of the rolling window ages out, which is not a countdown worth watching.
+   */
+  spotify_daily_budget_spent: {
+    en: "This site limits how many new playlists it loads from Spotify in a day, so one busy afternoon can't leave the evening with nothing — and today's allowance is gone. Playlists that have already been loaded still work, and some allowance frees up every hour. Your playlist URL is fine.",
+    zh: "這個網站每天會限制向 Spotify 載入新歌單的數量，免得一個下午就把整晚的額度用光 — 今天的額度已經用完了。已經載入過的歌單還是可以玩，每小時也會釋出一些額度。你的歌單連結沒有問題。",
   },
   spotify_busy: {
     en: "Too many new playlists are being loaded across the site right now. Please try again in a minute — your playlist URL is fine.",
@@ -430,7 +447,8 @@ export function errorMessage(
  *
  * Only failures that are a fact about the URL. Every throttling code is
  * excluded, and must stay excluded: `spotify_rate_limited`, `spotify_cooldown`,
- * `spotify_quota_exhausted` and `spotify_busy` are facts about a shared quota
+ * `spotify_quota_exhausted`, `spotify_daily_budget_spent` and `spotify_busy`
+ * are facts about a shared quota
  * that clears on its own, so
  * suppressing the retry would strand a host whose playlist was always fine —
  * the same class of mistake as the message that used to tell throttled hosts to

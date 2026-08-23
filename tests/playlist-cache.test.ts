@@ -1,7 +1,13 @@
 // @vitest-environment node
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import * as spotify from "@/lib/spotify";
-import { loadPlaylist, getCacheStats, __resetInFlightForTests } from "@/lib/playlist-cache";
+import {
+  loadPlaylist,
+  getCacheStats,
+  getDailyBudgetStatus,
+  getSpotifyServiceStatus,
+  __resetInFlightForTests,
+} from "@/lib/playlist-cache";
 import type { Track } from "@/types";
 
 /**
@@ -24,12 +30,21 @@ vi.mock("@/lib/kv", () => ({
   // reproduces it rather than stubbing it — a mocked bucket would let the key
   // format drift here without any test noticing.
   dayBucket: (at: Date = new Date()) => at.toISOString().slice(0, 10),
+  hourBucket: (at: Date = new Date()) => at.toISOString().slice(0, 13),
   getKvStore: async () => ({
     async get(key: string) {
       if (kv.flags.failReads) throw new Error("kv unavailable");
       const entry = kv.mem.get(key);
       if (!entry || Date.now() > entry.expiresAt) return null;
       return entry.value;
+    },
+    async mget(keys: string[]) {
+      if (kv.flags.failReads) throw new Error("kv unavailable");
+      return keys.map((key) => {
+        const entry = kv.mem.get(key);
+        if (!entry || Date.now() > entry.expiresAt) return null;
+        return entry.value;
+      });
     },
     async set(key: string, value: unknown, ttlSeconds: number) {
       if (kv.flags.failWrites) throw new Error("kv unavailable");
@@ -519,5 +534,233 @@ describe("KV degradation", () => {
     kv.flags.failWrites = true;
 
     await expect(loadPlaylist(URL_A)).resolves.toMatchObject({ totalTracks: 2 });
+  });
+});
+
+/**
+ * The read-only half of the cooldown, used by the site notice.
+ *
+ * The property that matters is that it agrees with the error a host would get
+ * from the same state, and that asking costs nothing upstream — a notice that
+ * spent a Spotify call to report that Spotify calls are failing would be a
+ * joke at the quota's expense.
+ */
+describe("getSpotifyServiceStatus", () => {
+  it("reports open when nothing is parked", async () => {
+    await expect(getSpotifyServiceStatus()).resolves.toEqual({
+      throttled: false,
+      code: null,
+      retryAfterSeconds: 0,
+    });
+  });
+
+  it("reports a blip with the same code the host would be shown", async () => {
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 90 })
+    );
+    const err = await loadPlaylist(URL_A).catch((e) => e);
+
+    const status = await getSpotifyServiceStatus();
+    expect(status.throttled).toBe(true);
+    expect(status.code).toBe("spotify_cooldown");
+    expect(status.code).toBe(err.code);
+    expect(status.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  it("reports a spent daily quota with the countdown-free code", async () => {
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 48513 })
+    );
+    const err = await loadPlaylist(URL_A).catch((e) => e);
+
+    const status = await getSpotifyServiceStatus();
+    expect(status.code).toBe("spotify_quota_exhausted");
+    expect(status.code).toBe(err.code);
+    // Honest, even though the message that renders it carries no {seconds}.
+    expect(status.retryAfterSeconds).toBeGreaterThan(10 * 60);
+  });
+
+  it("never reaches Spotify", async () => {
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 90 })
+    );
+    await loadPlaylist(URL_A).catch(() => {});
+    const before = upstreamCalls();
+
+    await getSpotifyServiceStatus();
+    await getSpotifyServiceStatus();
+
+    expect(upstreamCalls()).toBe(before);
+  });
+
+  /**
+   * Fail open, like every other KV consumer here. A cache outage must not put
+   * a "we are broken" notice on a site that is, as far as anyone can tell,
+   * fine.
+   */
+  it("reports open when KV cannot be read", async () => {
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 90 })
+    );
+    await loadPlaylist(URL_A).catch(() => {});
+
+    kv.flags.failReads = true;
+
+    await expect(getSpotifyServiceStatus()).resolves.toMatchObject({
+      throttled: false,
+      code: null,
+    });
+  });
+});
+
+/**
+ * The gate the per-minute one cannot be: Spotify refuses on a rolling ~24h
+ * quota, and 40-a-minute is never reached by a day's worth of traffic
+ * arriving at one or two loads a minute. Every assertion here is again about
+ * upstream call *count* — the point is not the error, it is that the call
+ * never left the building.
+ */
+describe("rolling 24h upstream budget", () => {
+  beforeEach(() => {
+    process.env.SPOTIFY_MAX_LOADS_PER_DAY = "3";
+  });
+
+  afterEach(() => {
+    delete process.env.SPOTIFY_MAX_LOADS_PER_DAY;
+  });
+
+  const uniqueUrl = (i: number) => `https://open.spotify.com/playlist/d${i}aaaaaaaaaa`;
+
+  it("refuses new playlists past the daily ceiling before Spotify does", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+    expect(upstreamCalls()).toBe(3);
+
+    await expect(loadPlaylist(uniqueUrl(9))).rejects.toMatchObject({
+      code: "spotify_daily_budget_spent",
+      status: 429,
+    });
+    expect(upstreamCalls()).toBe(3);
+  });
+
+  it("does not spend the day's budget on cached playlists", async () => {
+    await loadPlaylist(URL_A);
+    for (let i = 0; i < 10; i++) {
+      await expect(loadPlaylist(URL_A)).resolves.toMatchObject({ totalTracks: 2 });
+    }
+
+    // One load spent, so two of a ceiling of three are still there.
+    await expect(getDailyBudgetStatus()).resolves.toMatchObject({ used: 1, limit: 3 });
+    expect(upstreamCalls()).toBe(1);
+  });
+
+  /**
+   * The ordering rule in `fetchAndCache`, pinned. A load turned away for
+   * bursting never went upstream, so it must not spend a slot in a window that
+   * takes a day to give one back — otherwise a single burst permanently
+   * shrinks the day.
+   */
+  it("does not spend the day's budget on a load the per-minute gate refused", async () => {
+    process.env.SPOTIFY_MAX_LOADS_PER_MINUTE = "1";
+    try {
+      await loadPlaylist(uniqueUrl(0));
+      await expect(loadPlaylist(uniqueUrl(1))).rejects.toMatchObject({ code: "spotify_busy" });
+    } finally {
+      delete process.env.SPOTIFY_MAX_LOADS_PER_MINUTE;
+    }
+
+    await expect(getDailyBudgetStatus()).resolves.toMatchObject({ used: 1, refused: 0 });
+  });
+
+  /**
+   * The counterpart, and the reason this gate reads before it increments: a
+   * refusal that counted itself would inflate the sum that caused it and hold
+   * the window shut for a day.
+   */
+  it("counts its own refusals separately from the loads it allowed", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+    for (let i = 0; i < 4; i++) await loadPlaylist(uniqueUrl(9)).catch(() => {});
+
+    await expect(getDailyBudgetStatus()).resolves.toMatchObject({
+      used: 3,
+      refused: 4,
+      limit: 3,
+    });
+  });
+
+  it("sums the window across hours rather than resetting at midnight", async () => {
+    const now = new Date();
+    const anHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+    const hour = (at: Date) => at.toISOString().slice(0, 13);
+
+    // Two loads recorded an hour ago, by hand, in the shape the gate writes.
+    kv.mem.set(`spotify:budget:h:${hour(anHourAgo)}`, {
+      value: 2,
+      expiresAt: Date.now() + 60 * 60 * 1000,
+    });
+
+    // One more fits; the next does not, even though this hour has spent one.
+    await loadPlaylist(uniqueUrl(0));
+    await expect(loadPlaylist(uniqueUrl(1))).rejects.toMatchObject({
+      code: "spotify_daily_budget_spent",
+    });
+    expect(upstreamCalls()).toBe(1);
+
+    const status = await getDailyBudgetStatus(now);
+    expect(status.used).toBe(3);
+    expect(status.byHour.at(-1)).toMatchObject({ hour: hour(now), used: 1 });
+  });
+
+  it("tells the host to wait rather than to fix their URL", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+
+    const err = await loadPlaylist(uniqueUrl(9)).catch((e) => e);
+    // The hazard lib/error-messages.ts pins in both languages: a refusal that
+    // sends the host back to editing a URL that was always fine.
+    expect(err.message).not.toMatch(/public/i);
+    expect(err.retryAfterSeconds).toBeGreaterThan(0);
+    expect(err.retryAfterSeconds).toBeLessThanOrEqual(3600);
+  });
+
+  it("fails open when KV is unavailable, rather than blocking every load", async () => {
+    kv.flags.failReads = true;
+    await expect(loadPlaylist(URL_A)).resolves.toMatchObject({ totalTracks: 2 });
+    expect(upstreamCalls()).toBe(1);
+  });
+
+  /**
+   * There are two ways for the playlist path to be shut, and the site notice
+   * has to know about both. A banner blind to this gate would leave hosts
+   * pasting a link to find out what the page could have told them — which is
+   * the whole thing 1.7.2 exists to stop.
+   */
+  it("shows up in the service notice, not just at the Start button", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+    await expect(getSpotifyServiceStatus()).resolves.toMatchObject({ throttled: false });
+
+    await loadPlaylist(uniqueUrl(9)).catch(() => {});
+
+    const status = await getSpotifyServiceStatus();
+    expect(status).toMatchObject({ throttled: true, code: "spotify_daily_budget_spent" });
+    expect(status.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  /**
+   * Spotify's own refusal outranks ours: it is the longer wait and the one the
+   * host can do nothing about.
+   */
+  it("yields to a real Spotify cooldown when both are live", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+    await loadPlaylist(uniqueUrl(9)).catch(() => {});
+
+    upstream().mockRejectedValueOnce(
+      new spotify.SpotifyApiError("spotify_rate_limited", 429, { retryAfterSeconds: 52531 })
+    );
+    delete process.env.SPOTIFY_MAX_LOADS_PER_DAY;
+    await loadPlaylist(URL_B).catch(() => {});
+
+    await expect(getSpotifyServiceStatus()).resolves.toMatchObject({
+      throttled: true,
+      code: "spotify_quota_exhausted",
+    });
   });
 });

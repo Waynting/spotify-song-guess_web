@@ -88,6 +88,23 @@ export function dayBucket(at: Date = new Date()): string {
   return at.toISOString().slice(0, 10);
 }
 
+/**
+ * The same clock one resolution finer, for counters that have to add up to a
+ * *rolling* window rather than a calendar one.
+ *
+ * `lib/playlist-cache.ts` needs this because Spotify's quota turned out not to
+ * be a calendar day. Measured on production 2026-08-23: a `QUOTA_EXCEEDED`
+ * whose `Retry-After` resolved to 19:53 UTC — an instant roughly 24h after the
+ * previous evening's burn, not to any midnight. A day bucket against that
+ * window lets two busy half-days sit inside one rolling 24h and each pass its
+ * own cap; twenty-four of these, summed, is the window itself.
+ *
+ * UTC, and `at` for tests, for the same reasons `dayBucket` gives.
+ */
+export function hourBucket(at: Date = new Date()): string {
+  return at.toISOString().slice(0, 13);
+}
+
 type MemoryEntry = { value: unknown; expiresAt: number };
 
 declare global {

@@ -142,7 +142,8 @@ UPSTASH_REDIS_REST_URL / _TOKEN             # Required in production — see bel
 NEXT_PUBLIC_BASE_URL                        # Optional — defaults to https://www.guessong.app
 NEXT_PUBLIC_GA_MEASUREMENT_ID               # Optional — enables GA4
 NEXT_PUBLIC_ADSENSE_CLIENT_ID               # Optional — AdSense publisher id, defaults to ca-pub-2238954049312975
-SPOTIFY_MAX_LOADS_PER_MINUTE                # Optional — global upstream ceiling, default 40
+SPOTIFY_MAX_LOADS_PER_MINUTE                # Optional — global upstream burst ceiling, default 40
+SPOTIFY_MAX_LOADS_PER_DAY                   # Optional — global ceiling per rolling 24h, default 2000
 PREVIEW_MAX_LOOKUPS_PER_MINUTE              # Optional — global iTunes/Deezer ceiling, default 120
 ```
 

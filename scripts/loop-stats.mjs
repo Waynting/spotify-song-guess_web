@@ -440,6 +440,50 @@ if (cacheRows.length > 0) {
   }
 }
 
+/**
+ * Spotify's admission gate, over the window Spotify actually meters.
+ *
+ * The per-minute ceiling has never fired in production and never will at this
+ * traffic shape; the rolling 24h one is the gate that decides whether an
+ * evening has any playlist loads left in it. Its limit is a guess — Spotify
+ * publishes no number — so the hour-by-hour shape below is the only evidence
+ * there is for tuning it. Read it for *when* the window fills, not just
+ * whether: a day spent by lunchtime and a day spent at 11pm need opposite
+ * changes.
+ *
+ * The keys are written by `claimDailyBudget` in lib/playlist-cache.ts.
+ */
+const budgetHours = Array.from({ length: 24 }, (_, i) =>
+  new Date(Date.now() - i * 60 * 60 * 1000).toISOString().slice(0, 13)
+).reverse();
+const [budgetUsed, budgetRefused] = [
+  await mgetAll(budgetHours.map((h) => `spotify:budget:h:${h}`)),
+  await mgetAll(budgetHours.map((h) => `spotify:budget:refused:${h}`)),
+];
+const num = (v) => (Number.isFinite(Number(v)) ? Number(v) : 0);
+const usedTotal = budgetUsed.reduce((t, v) => t + num(v), 0);
+const refusedTotal = budgetRefused.reduce((t, v) => t + num(v), 0);
+
+if (usedTotal + refusedTotal > 0) {
+  const peak = Math.max(...budgetUsed.map(num), 1);
+  console.log("\nSpotify upstream budget — rolling 24h, the window that cuts us off");
+  console.log(
+    `  ${usedTotal} loads sent upstream, ${refusedTotal} refused here before Spotify saw them`
+  );
+  console.log("");
+  for (const [i, hour] of budgetHours.entries()) {
+    const used = num(budgetUsed[i]);
+    const refused = num(budgetRefused[i]);
+    // Hours with nothing in them are the finding, not noise — a flat evening
+    // after a full afternoon is exactly the shape a daily cap can produce.
+    const bar = "█".repeat(Math.round((used / peak) * 32));
+    const tail = refused > 0 ? `  (${refused} refused)` : "";
+    console.log(
+      `  ${hour.slice(11)}:00  ${String(used).padStart(4)}  ${bar}${tail}`
+    );
+  }
+}
+
 console.log(
   "\nRead these as floors, not measurements:\n" +
     "  · Repeat hosts are undercounted — iOS clears localStorage after 7 days\n" +
