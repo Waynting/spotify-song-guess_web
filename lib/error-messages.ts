@@ -54,6 +54,7 @@ export type AppErrorCode =
   // Spotify's shared quota — never phrased as the host's fault, see below
   | "spotify_rate_limited"
   | "spotify_cooldown"
+  | "spotify_quota_exhausted"
   | "spotify_busy"
   | "spotify_not_configured"
   | "spotify_auth_failed"
@@ -154,6 +155,18 @@ export const ERROR_MESSAGES: Record<AppErrorCode, Record<ErrorLocale, string>> =
   spotify_cooldown: {
     en: "Spotify is rate limiting us right now. Try again in about {seconds}s — your playlist URL is fine.",
     zh: "Spotify 目前正在限制我們的請求。大約 {seconds} 秒後再試一次 — 你的歌單連結沒有問題。",
+  },
+  /**
+   * Deliberately carries no `{seconds}`. This is the code for a wait measured
+   * in hours — Spotify's daily app quota, not a burst — and a countdown that
+   * long is a promise the app cannot keep: the host waits it out, presses
+   * Start, and lands on the same refusal. Says what is true and what still
+   * works instead, and like every code in this block it ends by clearing the
+   * host's URL, because the failure has nothing to do with it.
+   */
+  spotify_quota_exhausted: {
+    en: "Spotify has cut the whole site off for today — every game here shares one quota with Spotify and it is spent. Playlists that have already been loaded still work; new ones come back once Spotify resets. Your playlist URL is fine.",
+    zh: "Spotify 今天已經把整個網站擋下來了 — 這裡所有的遊戲共用同一份 Spotify 配額，而它用完了。已經載入過的歌單還是可以玩，新的歌單要等 Spotify 重置後才會恢復。你的歌單連結沒有問題。",
   },
   spotify_busy: {
     en: "Too many new playlists are being loaded across the site right now. Please try again in a minute — your playlist URL is fine.",
@@ -416,8 +429,9 @@ export function errorMessage(
  * ## What must never be listed here
  *
  * Only failures that are a fact about the URL. Every throttling code is
- * excluded, and must stay excluded: `spotify_rate_limited`, `spotify_cooldown`
- * and `spotify_busy` are facts about a shared quota that clears on its own, so
+ * excluded, and must stay excluded: `spotify_rate_limited`, `spotify_cooldown`,
+ * `spotify_quota_exhausted` and `spotify_busy` are facts about a shared quota
+ * that clears on its own, so
  * suppressing the retry would strand a host whose playlist was always fine —
  * the same class of mistake as the message that used to tell throttled hosts to
  * check their URL was public. `playlist_load_failed`, `unknown` and

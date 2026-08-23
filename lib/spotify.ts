@@ -184,6 +184,12 @@ export interface SpotifyPlaylist {
       track: SpotifyTrack | null;
     }>;
     total: number;
+    /**
+     * Spotify returns the first page of tracks inside the playlist object, as
+     * a full paging object. Declared here because fetchPlaylistHead reads it
+     * instead of spending a second request re-fetching the same page.
+     */
+    next?: string | null;
   };
 }
 
@@ -219,44 +225,6 @@ export function parsePlaylistUrl(url: string): string | null {
 }
 
 /**
- * Fetch playlist data from Spotify API
- * Requires user access token for user's own playlists
- */
-export async function fetchPlaylist(
-  playlistId: string,
-  accessToken: string,
-  signal?: AbortSignal
-): Promise<SpotifyPlaylist> {
-  const response = await fetch(`${SPOTIFY_API_BASE}/playlists/${playlistId}`, {
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-    },
-    signal,
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({ error: { message: response.statusText } }));
-    console.error("Spotify playlist fetch error:", response.status, errorData);
-
-    if (response.status === 404) {
-      throw new SpotifyApiError("playlist_not_found", 404);
-    }
-
-    if (response.status === 429) {
-      throw new SpotifyApiError(RATE_LIMITED_CODE, 429, {
-        retryAfterSeconds: parseRetryAfter(response),
-      });
-    }
-
-    throw new SpotifyApiError("playlist_load_failed", response.status, {
-      detail: `playlist: ${response.status} ${errorData.error?.message || response.statusText}`,
-    });
-  }
-
-  return response.json();
-}
-
-/**
  * Spotify allows up to 100 items per page here. This asked for 50, which meant
  * every playlist cost exactly twice the upstream requests it needed to — the
  * single cheapest thing to change when the app's shared quota is the bottleneck.
@@ -270,35 +238,120 @@ const TRACKS_PAGE_LIMIT = 100;
  * (SONG_COUNTS in app/page.tsx), or samples 8 per player in Mixed mode.
  *
  * 500 covers "All" for any playlist a party would realistically use while
- * bounding the worst case at 5 requests. Beyond it we take the first 500 and
- * report `truncated`, rather than silently pretending we read the whole thing.
+ * bounding the worst case at 5 upstream calls — the merged head is one of
+ * them, so the whole read is 5, not 5 plus a metadata call. Beyond it we take
+ * the first 500 and report `truncated`, rather than silently pretending we
+ * read the whole thing.
  */
 export const MAX_PLAYLIST_TRACKS = 500;
 
 /** How many pages MAX_PLAYLIST_TRACKS works out to. */
 const MAX_TRACK_PAGES = Math.ceil(MAX_PLAYLIST_TRACKS / TRACKS_PAGE_LIMIT);
 
+/**
+ * What we ask Spotify to serialise for one page of tracks.
+ *
+ * Everything listed is read by convertSpotifyTrack or by lib/playlist-cache.ts.
+ * Anything not listed is bytes we parse and drop, and on a 500-track playlist
+ * the default response is mostly fields nothing here has ever looked at.
+ */
+const TRACK_PAGE_FIELDS =
+  "total,next,items(track(id,name,duration_ms,popularity,artists(name),album(name,images(url))))";
+
+/**
+ * The same projection, reached through the playlist object.
+ *
+ * `GET /playlists/{id}` returns the first page of tracks embedded in its reply
+ * whether we ask for it or not. The app used to fetch that, parse it, throw it
+ * away, and then spend a second request on `/playlists/{id}/tracks?offset=0`
+ * for the identical page. On the Spotify dashboard that duplicate was ~45% of
+ * every request the site made: ~1.75k metadata calls against ~2.1k track
+ * pages, i.e. about 1.2 pages per playlist, so for the great majority of
+ * playlists the embedded page was the whole job and the second request bought
+ * nothing. Naming `tracks` here is what lets fetchPlaylistTracks start at page
+ * two, and it saves exactly one upstream call on every cold load.
+ */
+const PLAYLIST_FIELDS = `id,name,tracks(${TRACK_PAGE_FIELDS})`;
+
 interface TrackPage {
   tracks: SpotifyTrack[];
   /** Length of the whole playlist, not of this page. */
   total: number;
-  next: string | null;
+  /**
+   * Offset to read next, or null when this was the last page.
+   *
+   * This used to be Spotify's raw `next` URL, but the only question the caller
+   * ever asked it was "is there another page" — it then derived the offset
+   * itself from TRACKS_PAGE_LIMIT. That arithmetic is wrong the moment a page
+   * comes back a different size than the constant says, which is exactly what
+   * the embedded first page can do: it arrives with the playlist object and
+   * there is no `limit` to send it. Derive the offset from the page we were
+   * actually handed.
+   */
+  nextOffset: number | null;
+  /**
+   * Entries Spotify sent on this page, before nulls were filtered out of
+   * `tracks`. Zero means the page itself was absent, which is a different
+   * thing from a page whose every entry was a local file — and the only
+   * signal that separates them.
+   */
+  rawCount: number;
+}
+
+/**
+ * Reads Spotify's paging shape, which is identical on the playlist object and
+ * on the tracks endpoint — so the merged first page and every page after it
+ * are interpreted by the same code rather than by two rules that can drift.
+ */
+function readTrackPage(
+  paging:
+    | {
+        items?: Array<{ track: SpotifyTrack | null }> | null;
+        total?: number;
+        next?: string | null;
+      }
+    | null
+    | undefined,
+  offset: number
+): TrackPage {
+  const rawItems = Array.isArray(paging?.items) ? paging.items : [];
+  const tracks = rawItems
+    .map((item) => item?.track)
+    .filter((track): track is SpotifyTrack => track != null);
+  const total =
+    typeof paging?.total === "number" ? paging.total : offset + rawItems.length;
+  const consumed = offset + rawItems.length;
+
+  // `next` decides it whenever Spotify sends one. The arithmetic is a fallback
+  // rather than the rule because `total` counts entries — local files and
+  // unavailable tracks included — that get filtered out of `tracks` above, so
+  // comparing it against what we kept would read pages that aren't there.
+  // Against the *raw* page length it is exact, and erring towards one extra
+  // request is the right way round: stopping early shortens someone's game and
+  // says nothing about it.
+  const hasMore =
+    rawItems.length > 0 && (paging?.next != null || consumed < total);
+
+  return {
+    tracks,
+    total,
+    nextOffset: hasMore ? consumed : null,
+    rawCount: rawItems.length,
+  };
 }
 
 /** One page of playlist tracks. All the upstream error handling lives here. */
 async function fetchTrackPage(
   playlistId: string,
   accessToken: string,
-  offset: number,
-  signal?: AbortSignal
+  offset: number
 ): Promise<TrackPage> {
   // Don't specify market when using user token - let Spotify use user's country
-  const url = `${SPOTIFY_API_BASE}/playlists/${playlistId}/tracks?limit=${TRACKS_PAGE_LIMIT}&offset=${offset}`;
+  const url = `${SPOTIFY_API_BASE}/playlists/${playlistId}/tracks?limit=${TRACKS_PAGE_LIMIT}&offset=${offset}&fields=${TRACK_PAGE_FIELDS}`;
   const response = await fetch(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
     },
-    signal,
   });
 
   if (!response.ok) {
@@ -320,16 +373,53 @@ async function fetchTrackPage(
     });
   }
 
-  const data = await response.json();
-  const tracks: SpotifyTrack[] = data.items
-    .map((item: { track: SpotifyTrack | null }) => item.track)
-    .filter((track: SpotifyTrack | null): track is SpotifyTrack => track !== null);
+  return readTrackPage(await response.json(), offset);
+}
 
-  return {
-    tracks,
-    total: typeof data.total === "number" ? data.total : tracks.length,
-    next: data.next || null,
-  };
+/**
+ * The playlist's name and its first page of tracks, in one request.
+ *
+ * This is the call that used to be two. See PLAYLIST_FIELDS for the measured
+ * cost of the duplicate; the shape here is the fix. Errors are handled exactly
+ * as fetchTrackPage handles them, because from a caller's point of view this
+ * *is* the first track page — it just brings the playlist name with it.
+ */
+export async function fetchPlaylistHead(
+  playlistId: string,
+  accessToken: string
+): Promise<{ playlist: SpotifyPlaylist; firstPage: TrackPage }> {
+  const response = await fetch(
+    `${SPOTIFY_API_BASE}/playlists/${playlistId}?fields=${PLAYLIST_FIELDS}`,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    }
+  );
+
+  if (!response.ok) {
+    const errorData = await response
+      .json()
+      .catch(() => ({ error: { message: response.statusText } }));
+    console.error("Spotify playlist fetch error:", response.status, errorData);
+
+    if (response.status === 404) {
+      throw new SpotifyApiError("playlist_not_found", 404);
+    }
+
+    if (response.status === 429) {
+      throw new SpotifyApiError(RATE_LIMITED_CODE, 429, {
+        retryAfterSeconds: parseRetryAfter(response),
+      });
+    }
+
+    throw new SpotifyApiError("playlist_load_failed", response.status, {
+      detail: `playlist: ${response.status} ${errorData.error?.message || response.statusText}`,
+    });
+  }
+
+  const playlist = (await response.json()) as SpotifyPlaylist;
+  return { playlist, firstPage: readTrackPage(playlist.tracks, 0) };
 }
 
 /** Fisher-Yates. Array#sort with a random comparator is not a uniform shuffle. */
@@ -364,33 +454,54 @@ function samplePageIndices(min: number, max: number, count: number): number[] {
  * reading it is how we learn the length, so the first 100 tracks are slightly
  * over-represented; everything after them is uniform.
  *
- * `signal` matters more than it looks: this runs concurrently with
- * fetchPlaylist under a Promise.all, and Promise.all rejects on the *first*
- * failure. Without a signal the loser kept paginating after the HTTP response
- * had already been sent — burning quota nobody was waiting for, and emitting
- * its console.error with no request context, which is why "Spotify tracks
- * fetch error" showed up in /api/preview's logs.
+ * Takes the first page rather than fetching it: it arrives with the playlist
+ * object (see PLAYLIST_FIELDS), so page zero costs nothing here. That also
+ * deleted the AbortSignal this function used to thread through every page.
+ * The signal existed because this ran concurrently with the metadata call
+ * under a Promise.all, which rejects on the *first* failure while the losing
+ * half keeps paginating against Spotify long after the HTTP response has gone
+ * out. There is no second half to lose now — a failed head means pagination
+ * never starts — so the failure mode is gone rather than managed.
  */
 export async function fetchPlaylistTracks(
   playlistId: string,
   accessToken: string,
-  signal?: AbortSignal
+  firstPage: TrackPage
 ): Promise<{ tracks: SpotifyTrack[]; truncated: boolean }> {
-  const firstPage = await fetchTrackPage(playlistId, accessToken, 0, signal);
+  // Insurance on the one thing this file cannot check for itself: that
+  // PLAYLIST_FIELDS still names the embedded page the way Spotify expects. A
+  // projection Spotify doesn't recognise doesn't error — it answers without
+  // `items`, and every playlist on the site would quietly load as empty.
+  //
+  // `rawCount` rather than `tracks.length` is what makes this exact. A
+  // hundred-track playlist of nothing but local files also yields zero
+  // usable tracks, and testing for that would spend an extra request and log
+  // a message pointing at the wrong thing — the kind of false lead this
+  // file's comments exist to prevent. An absent page has no entries at all.
+  let head = firstPage;
+  if (head.rawCount === 0 && head.total > 0) {
+    console.error(
+      "[spotify] playlist object carried no embedded track page — check PLAYLIST_FIELDS"
+    );
+    head = await fetchTrackPage(playlistId, accessToken, 0);
+  }
 
-  if (firstPage.total <= MAX_PLAYLIST_TRACKS) {
-    const tracks = [...firstPage.tracks];
-    let next = firstPage.next;
-    let offset = TRACKS_PAGE_LIMIT;
+  if (head.total <= MAX_PLAYLIST_TRACKS) {
+    const tracks = [...head.tracks];
+    let offset = head.nextOffset;
 
-    // `total` counts entries, but local files and unavailable tracks come back
-    // as null and get filtered out, so it over-counts what we actually keep.
-    // Keep following `next` (bounded) rather than trusting the arithmetic.
-    while (next && tracks.length < MAX_PLAYLIST_TRACKS) {
-      const page = await fetchTrackPage(playlistId, accessToken, offset, signal);
+    // Bounded by page count, not just by `tracks.length`. Filtered-out entries
+    // (local files, unavailable tracks) never grow `tracks`, so on a playlist
+    // made of them the only brake left is upstream telling the truth about
+    // `next` — and MAX_TRACK_PAGES is a promise this module makes about the
+    // quota, not a hope about Spotify. The head is page one, so the loop gets
+    // the rest. A legitimate 500-track playlist needs exactly this many.
+    let pagesLeft = MAX_TRACK_PAGES - 1;
+    while (offset !== null && pagesLeft > 0 && tracks.length < MAX_PLAYLIST_TRACKS) {
+      const page = await fetchTrackPage(playlistId, accessToken, offset);
       tracks.push(...page.tracks);
-      next = page.next;
-      offset += TRACKS_PAGE_LIMIT;
+      offset = page.nextOffset;
+      pagesLeft -= 1;
     }
 
     return {
@@ -399,16 +510,15 @@ export async function fetchPlaylistTracks(
     };
   }
 
-  const lastPageIndex = Math.ceil(firstPage.total / TRACKS_PAGE_LIMIT) - 1;
+  const lastPageIndex = Math.ceil(head.total / TRACKS_PAGE_LIMIT) - 1;
   const sampledPages = samplePageIndices(1, lastPageIndex, MAX_TRACK_PAGES - 1);
 
-  const tracks = [...firstPage.tracks];
+  const tracks = [...head.tracks];
   for (const pageIndex of sampledPages) {
     const page = await fetchTrackPage(
       playlistId,
       accessToken,
-      pageIndex * TRACKS_PAGE_LIMIT,
-      signal
+      pageIndex * TRACKS_PAGE_LIMIT
     );
     tracks.push(...page.tracks);
   }
@@ -459,25 +569,20 @@ export async function getPlaylistWithTracks(
   for (let attempt = 0; ; attempt++) {
     const token = await getClientAccessToken();
 
-    // Ties the metadata call and the tracks pagination together so the first
-    // failure cancels its sibling. Promise.all settles on that first rejection
-    // and we return, but without this the other half keeps running against
-    // Spotify long after the response has gone out — the exact behaviour that
-    // turns one throttled request into several.
-    const controller = new AbortController();
-
     try {
-      const [playlist, trackPage] = await Promise.all([
-        fetchPlaylist(playlistId, token, controller.signal),
-        fetchPlaylistTracks(playlistId, token, controller.signal),
-      ]);
+      // Sequential, and that is the whole point. These two used to go out
+      // together under a Promise.all with an AbortController threaded into
+      // every page, because the metadata call and page zero were separate
+      // requests for overlapping data. They are one request now, so the head
+      // both costs less and gates the rest: nothing paginates until we know
+      // the playlist is readable, and a failed head spends zero track pages.
+      const { playlist, firstPage } = await fetchPlaylistHead(playlistId, token);
+      const trackPage = await fetchPlaylistTracks(playlistId, token, firstPage);
 
       const tracks = trackPage.tracks.map(convertSpotifyTrack);
 
       return { playlist, tracks, truncated: trackPage.truncated };
     } catch (err) {
-      controller.abort();
-
       const isAuthFailure = err instanceof SpotifyApiError && err.status === 401;
       if (!isAuthFailure) throw err;
 

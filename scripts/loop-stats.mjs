@@ -203,10 +203,15 @@ if (keys.length === 0) {
  * days times the metric count is already a few hundred keys and the metric
  * count only goes up.
  */
-const values = [];
-for (let i = 0; i < keys.length; i += 256) {
-  values.push(...((await redis(["MGET", ...keys.slice(i, i + 256)])) ?? []));
+async function mgetAll(wanted) {
+  const out = [];
+  for (let i = 0; i < wanted.length; i += 256) {
+    out.push(...((await redis(["MGET", ...wanted.slice(i, i + 256)])) ?? []));
+  }
+  return out;
 }
+
+const values = await mgetAll(keys);
 const window = new Set(bucketsFor(days));
 
 /** metric -> total, and the set of days that recorded anything at all. */
@@ -330,11 +335,119 @@ if (throttled > 0) {
   );
 }
 
+/**
+ * Upstream cache health — the other half of "can this keep running".
+ *
+ * The loop counters say whether the product spreads. These say whether it can
+ * afford to. Every playlist miss is a call against Spotify's quota, which is
+ * per *app* rather than per visitor, and every preview miss is up to five
+ * against iTunes and Deezer, which throttle a serverless deploy's shared
+ * egress IPs as one very noisy client. Neither budget grows with the audience.
+ *
+ * They are printed here for the reason in this file's header. On 2026-08-23
+ * Spotify cut the whole app off for fourteen hours — `retry-after: 52531`,
+ * `reason: QUOTA_EXCEEDED` — and the playlist hit rate had been sitting at 26%
+ * for days beforehand, because a 6h TTL aged out faster than parties recur.
+ * `getCacheStats()` had that number the entire time. Nothing called it, so the
+ * first anyone knew was the outage.
+ *
+ * `negative` and `unavailable` are subsets of the columns above them, not
+ * extra rows. A replayed 404 is a genuine hit — it answered without going
+ * upstream, which is all the rate claims — and an `unavailable` is a genuine
+ * miss. They are broken out because each is the case that makes a
+ * healthy-looking number and an unhealthy situation read identically: a host
+ * hammering a dead link pushes the hit rate *up*.
+ *
+ * Read by constructed key rather than by SCAN, which is the one place this
+ * file departs from its own discovery rule — deliberately.
+ *
+ * `MATCH` is applied server-side but the scan still walks the whole instance,
+ * and lib/preview-cache.ts holds one key per track for a year: 200k+ keys, so
+ * a single namespace scan is ~200 REST round-trips. Two more of those on every
+ * `npm run stats` would triple the command cost of the one report this project
+ * asks people to run at the start of every session — on a KV plan where the
+ * roster poll's backoff ladder already exists to protect the same budget.
+ *
+ * Discovery earns its cost above because loop surface names are open-ended
+ * (lib/loop-links.ts adds them). These kinds are not: both are closed unions
+ * in TypeScript — `"hit" | "miss" | "negative"` in lib/playlist-cache.ts and
+ * `"hit" | "miss" | "unavailable"` in lib/preview-cache.ts — so mirroring them
+ * is mirroring a compile-checked set, and widening one without adding it here
+ * is the one drift this trades for two commands instead of four hundred.
+ */
+async function cacheTotals(namespace, kinds, buckets) {
+  const wanted = buckets.flatMap((day) =>
+    kinds.map((kind) => `${namespace}:stats:${day}:${kind}`)
+  );
+  const counts = await mgetAll(wanted);
+
+  const byKind = new Map();
+  wanted.forEach((key, i) => {
+    const kind = key.split(":")[3];
+    const count = Number(counts[i] ?? 0);
+    if (!Number.isFinite(count)) return;
+    byKind.set(kind, (byKind.get(kind) ?? 0) + count);
+  });
+  return byKind;
+}
+
+const caches = [
+  { name: "playlist", upstream: "Spotify", subset: "negative", kinds: ["hit", "miss", "negative"] },
+  { name: "preview", upstream: "iTunes/Deezer", subset: "unavailable", kinds: ["hit", "miss", "unavailable"] },
+];
+
+const windowDays = bucketsFor(days);
+const cacheRows = [];
+for (const cache of caches) {
+  const byKind = await cacheTotals(cache.name, cache.kinds, windowDays);
+  const hits = byKind.get("hit") ?? 0;
+  const misses = byKind.get("miss") ?? 0;
+  if (hits + misses === 0) continue;
+  cacheRows.push({ ...cache, hits, misses, subset: byKind.get(cache.subset) ?? 0 });
+}
+
+if (cacheRows.length > 0) {
+  // Header and rows share the widths so they cannot drift apart.
+  const row = (a, b, c, d, e) =>
+    `${a.padEnd(13)}${b.padEnd(15)}${c.padStart(8)}${d.padStart(10)}${e.padStart(9)}`;
+  console.log("\nUpstream cache — every miss is a call somebody else meters");
+  console.log(row("Cache", "upstream", "hits", "misses", "rate"));
+  console.log("─".repeat(55));
+  for (const c of cacheRows) {
+    console.log(
+      row(c.name, c.upstream, String(c.hits), String(c.misses), pct(c.hits, c.hits + c.misses).trim())
+    );
+  }
+  for (const c of cacheRows) {
+    if (c.subset === 0) continue;
+    if (c.name === "playlist") {
+      // Subtracted rather than merely reported: a host retrying a playlist
+      // they made private is the one input that inflates this rate, and it
+      // inflates it in exactly the situation you would want it to fall.
+      console.log(
+        `\n  playlist: ${c.subset} of those hits replayed a cached 404 — ` +
+          `real rate ${pct(c.hits - c.subset, c.hits + c.misses).trim()}`
+      );
+    } else {
+      // The distinction lib/preview-cache.ts is built around: `absent` is a
+      // fact about the recording and lasts a week, `unavailable` is a fact
+      // about us being throttled or out of budget and lasts 90 seconds.
+      console.log(
+        `  preview:  ${c.subset} of those misses were us, not the catalogue ` +
+          "(throttled or out of budget)"
+      );
+    }
+  }
+}
+
 console.log(
   "\nRead these as floors, not measurements:\n" +
     "  · Repeat hosts are undercounted — iOS clears localStorage after 7 days\n" +
     "    idle, which is exactly the gap between two parties.\n" +
     "  · Followed counts miss anyone whose click never reached the server.\n" +
     "  · A low number can mean the CTA does not work, or that we could not see\n" +
-    "    that it did. Only the direction over time is trustworthy.\n"
+    "    that it did. Only the direction over time is trustworthy.\n" +
+    "  · The cache table is the exception. Those counters are incremented on\n" +
+    "    the server, on the path itself, so nothing can drop one — read them\n" +
+    "    as the measurement the loop numbers are not.\n"
 );
