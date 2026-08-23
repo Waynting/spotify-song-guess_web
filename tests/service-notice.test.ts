@@ -2,6 +2,7 @@
 import { describe, it, expect } from "vitest";
 import {
   NOTICE_DISMISS_KEY,
+  SELF_HOST_URL,
   SERVICE_NOTICE_UI,
   shouldShowNotice,
 } from "@/lib/service-notice";
@@ -81,7 +82,7 @@ describe("shouldShowNotice", () => {
 
 describe("SERVICE_NOTICE_UI", () => {
   it("carries both languages, and they differ", () => {
-    for (const key of ["title", "dismiss", "close"] as const) {
+    for (const key of ["title", "dismiss", "close", "repo"] as const) {
       expect(SERVICE_NOTICE_UI.en[key].trim()).not.toBe("");
       expect(SERVICE_NOTICE_UI.zh[key].trim()).not.toBe("");
       expect(SERVICE_NOTICE_UI.en[key]).not.toBe(SERVICE_NOTICE_UI.zh[key]);
@@ -94,9 +95,18 @@ describe("SERVICE_NOTICE_UI", () => {
    * pins for the footer.
    */
   it("keeps the Chinese strings free of ASCII letters", () => {
-    for (const key of ["title", "dismiss", "close"] as const) {
+    for (const key of ["title", "dismiss", "close", "repo"] as const) {
       expect(SERVICE_NOTICE_UI.zh[key]).not.toMatch(/[A-Za-z]/);
     }
+  });
+
+  /**
+   * The label is the only part of this a reader sees, so a wrong href fails
+   * silently: the notice still renders, the link still looks like a link, and
+   * it lands nowhere. It is the one remedy the message offers.
+   */
+  it("points the self-host link at the repo", () => {
+    expect(SELF_HOST_URL).toBe("https://github.com/Waynting/GuessSong");
   });
 
   it("namespaces the dismissal key like the other session keys", () => {
