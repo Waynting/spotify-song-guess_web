@@ -87,6 +87,27 @@ describe("the message table", () => {
     }
   });
 
+  /**
+   * The two codes that mean "no new playlists today" have to answer the
+   * question a host is actually left with, which is not "how long" — the wait
+   * is hours — but "why, and can I do anything". Without the account, the
+   * screen reads as neglect or as something money would fix, and neither is
+   * true. Pinned in both languages because a translation is exactly where the
+   * awkward half of a sentence gets dropped.
+   */
+  it("says the app is free, that the quota cannot be topped up, and where to go instead", () => {
+    for (const code of ["spotify_quota_exhausted", "spotify_daily_budget_spent"] as const) {
+      expect(ERROR_MESSAGES[code].en, `${code}.en does not apologise`).toMatch(/sorry/i);
+      expect(ERROR_MESSAGES[code].zh, `${code}.zh does not apologise`).toMatch(/抱歉/);
+
+      expect(ERROR_MESSAGES[code].en, `${code}.en does not say it is free`).toMatch(/free/i);
+      expect(ERROR_MESSAGES[code].zh, `${code}.zh does not say it is free`).toMatch(/免費/);
+
+      expect(ERROR_MESSAGES[code].en, `${code}.en offers no way out`).toMatch(/open source/i);
+      expect(ERROR_MESSAGES[code].zh, `${code}.zh offers no way out`).toMatch(/開源/);
+    }
+  });
+
   it("covers every code the buzzer Worker can send", () => {
     // The Worker ships its own copy of lib/buzzer-protocol.ts and cannot import
     // this table, so nothing but this test connects the two.
