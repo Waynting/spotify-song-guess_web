@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { SiteFooter } from "@/components/site-footer";
+import { ServiceNotice } from "@/components/service-notice";
 
 export const metadata: Metadata = {
   // Unlike the English pages, the H1 here IS the keyword — /zh is not the brand
@@ -427,6 +428,7 @@ export default function ZhPage() {
             </div>
           </section>
 
+          <ServiceNotice locale="zh" />
           <SiteFooter locale="zh" />
         </div>
       </main>

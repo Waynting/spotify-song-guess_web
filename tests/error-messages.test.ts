@@ -77,6 +77,7 @@ describe("the message table", () => {
       "spotify_rate_limited",
       "spotify_cooldown",
       "spotify_quota_exhausted",
+      "spotify_daily_budget_spent",
       "spotify_busy",
     ] as const) {
       expect(ERROR_MESSAGES[code].en).not.toMatch(/public/i);
@@ -138,6 +139,7 @@ describe("isDeterministicPlaylistFailure", () => {
       "spotify_rate_limited",
       "spotify_cooldown",
       "spotify_quota_exhausted",
+      "spotify_daily_budget_spent",
       "spotify_busy",
       "rate_limited",
       "rate_limited_playlist",

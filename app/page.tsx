@@ -18,6 +18,7 @@ import {
   shouldRememberRejection,
 } from "@/lib/error-messages";
 import { useErrorLocale } from "@/lib/use-error-locale";
+import { ServiceNotice } from "@/components/service-notice";
 import { buildGamePayload, GAME_STORAGE_KEY } from "@/lib/game-session";
 import { isBuzzerConfigured } from "@/lib/buzzer-client";
 import type { OpenRoom } from "@/lib/room-client";
@@ -1425,6 +1426,7 @@ export default function SetupPage() {
             </p>
           </section>
 
+          <ServiceNotice />
           <SiteFooter />
 
         </div>

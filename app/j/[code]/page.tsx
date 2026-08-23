@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LoopCtaButton, LoopFooter } from "@/components/loop-cta";
+import { ServiceNotice } from "@/components/service-notice";
 
 type SubmitStatus = "idle" | "loading" | "done" | "error";
 
@@ -144,6 +145,7 @@ export default function JoinRoomPage() {
             {status === "loading" ? "Submitting..." : "Submit Playlist"}
           </Button>
           {error && <p className="text-sm text-destructive">{error}</p>}
+          <ServiceNotice />
           <LoopFooter surface="join_footer" />
         </CardContent>
       </Card>
