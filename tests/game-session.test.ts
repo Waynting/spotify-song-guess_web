@@ -231,3 +231,78 @@ describe("countRoundsPlayed", () => {
     expect(countRoundsPlayed(15, "revealed")).toBe(16);
   });
 });
+
+/**
+ * The track list used to be cast straight out of JSON with `as Track[]`, so
+ * anything malformed reached the render. The game page dereferences
+ * `t.artists[0]` in its preview-prefetch effect on mount, which made one bad
+ * entry a TypeError there — and with no error boundary in `app/` at the time,
+ * the whole page became "Application error: a client-side exception has
+ * occurred". These pin the repair-or-drop split that replaced the cast.
+ */
+describe("parseGamePayload track validation", () => {
+  const good = {
+    id: "t1",
+    name: "Song",
+    artists: ["Artist"],
+    durationMs: 200_000,
+    createdAt: "2026-08-24T00:00:00.000Z",
+  };
+
+  function parseTracks(tracks: unknown[]) {
+    return parseGamePayload(
+      JSON.stringify({ tracks, players: [], playlistName: "P", clipDuration: 15 })
+    );
+  }
+
+  it("repairs a missing artists array rather than dropping the song", () => {
+    const parsed = parseTracks([{ ...good, artists: undefined }]);
+    expect(parsed?.tracks).toHaveLength(1);
+    expect(parsed?.tracks[0].artists).toEqual([]);
+    // The exact call the game page makes on mount.
+    expect(() => parsed?.tracks.map((t) => t.artists[0] ?? "")).not.toThrow();
+  });
+
+  it("drops non-string entries from artists", () => {
+    const parsed = parseTracks([{ ...good, artists: ["A", null, 7, "B"] }]);
+    expect(parsed?.tracks[0].artists).toEqual(["A", "B"]);
+  });
+
+  it("defaults a missing durationMs to 0 rather than undefined", () => {
+    const parsed = parseTracks([{ ...good, durationMs: "long" }]);
+    expect(parsed?.tracks[0].durationMs).toBe(0);
+  });
+
+  it("drops a track with no id or no name — nothing can play or reveal it", () => {
+    const parsed = parseTracks([
+      { ...good, id: undefined },
+      { ...good, name: undefined },
+      null,
+      "not a track",
+      good,
+    ]);
+    expect(parsed?.tracks).toHaveLength(1);
+    expect(parsed?.tracks[0].id).toBe("t1");
+  });
+
+  it("keeps the fields it does not police", () => {
+    const parsed = parseTracks([{ ...good, albumName: "Album", popularity: 90 }]);
+    expect(parsed?.tracks[0].albumName).toBe("Album");
+    expect(parsed?.tracks[0].popularity).toBe(90);
+  });
+
+  it("drops a malformed player rather than putting a blank row on the scoreboard", () => {
+    const parsed = parseGamePayload(
+      JSON.stringify({
+        tracks: [good],
+        players: [{ name: "Alice", score: 3 }, { score: 1 }, null, { name: "Bob" }],
+        playlistName: "P",
+        clipDuration: 15,
+      })
+    );
+    expect(parsed?.players).toEqual([
+      { name: "Alice", score: 3 },
+      { name: "Bob", score: 0 },
+    ]);
+  });
+});
