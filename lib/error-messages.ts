@@ -56,6 +56,7 @@ export type AppErrorCode =
   | "spotify_cooldown"
   | "spotify_quota_exhausted"
   | "spotify_daily_budget_spent"
+  | "spotify_budget_low"
   | "spotify_busy"
   | "spotify_not_configured"
   | "spotify_auth_failed"
@@ -90,6 +91,9 @@ export type AppErrorCode =
   // Setup screen validation
   | "players_required"
   | "mixed_min_contributors"
+  // The browser itself, not the playlist — see the note above their entries
+  | "storage_blocked"
+  | "client_error"
   // Buzzer
   | "buzzer_not_configured"
   | "buzzer_origin_blocked"
@@ -198,6 +202,24 @@ export const ERROR_MESSAGES: Record<AppErrorCode, Record<ErrorLocale, string>> =
   spotify_daily_budget_spent: {
     en: "Sorry — today's allowance is gone. GuessSong is free and every game here shares one Spotify quota, and Spotify's policy gives a project like this no way to buy a bigger one, so the site rations what it has: one busy afternoon must not leave the evening with nothing. Playlists that have already been loaded still work, and some allowance frees up every hour. GuessSong is also open source, so anyone who would rather not wait can run their own copy on their own quota. Your playlist URL is fine.",
     zh: "抱歉 — 今天的額度已經用完了。GuessSong 是免費服務，所有的遊戲共用同一份 Spotify 配額，而 Spotify 的政策不讓這樣的專案加購更多，所以網站只能把手上的額度配給著用：不能讓一個下午就把整晚的份用光。已經載入過的歌單還是可以玩，每小時也會釋出一些額度。GuessSong 也是開源的，不想等的人可以用自己的配額架一站自己跑。你的歌單連結沒有問題。",
+  },
+  /*
+   * The only code in this table that is not a refusal.
+   *
+   * Everything else here answers "why did that fail". This one fires while the
+   * site still works, at BUDGET_WARN_RATIO of the day's allowance, so a host
+   * about to run a party learns tonight is at risk at the moment they can still
+   * do something about it — load the playlist now while there is allowance, or
+   * pick one that has already been played. Told only at the refusal, that
+   * choice has already been taken away from them.
+   *
+   * It has to state that nothing is wrong yet, or it reads as the refusal and
+   * hosts leave a working site. And it carries no `{seconds}`: what is being
+   * described is a level, not a wait — there is nothing to count down to.
+   */
+  spotify_budget_low: {
+    en: "Heads up: the site is close to today's Spotify allowance. Everything still works right now, and playlists that have already been played are unaffected. If you're hosting tonight, it's worth loading your playlist soon — new ones may stop loading later this evening until some allowance frees up. GuessSong is free and open source, so you can also run your own copy on your own quota.",
+    zh: "提醒一下：網站快要用完今天的 Spotify 額度了。現在一切都還正常，已經玩過的歌單也不受影響。如果你今晚要辦活動，建議早一點把歌單載入 — 晚一點新歌單可能會載入不了，要等額度釋出。GuessSong 是免費且開源的，你也可以用自己的配額架一站自己跑。",
   },
   spotify_busy: {
     en: "Too many new playlists are being loaded across the site right now. Please try again in a minute — your playlist URL is fine.",
@@ -339,6 +361,27 @@ export const ERROR_MESSAGES: Record<AppErrorCode, Record<ErrorLocale, string>> =
   mixed_min_contributors: {
     en: "Add at least {count} players' playlists to start.",
     zh: "至少要有 {count} 個人的歌單才能開始。",
+  },
+
+  /*
+   * These two say "the browser", and they have to, because the alternative is
+   * what this replaced.
+   *
+   * A host whose browser refuses to store the game used to be told
+   * `playlist_load_failed` — "Couldn't load that playlist" — because the write
+   * sat inside the same try/catch as the fetch. That is the same mistake as
+   * telling a throttled host to check their URL was public: it names the one
+   * thing that was fine, so the host swaps playlists, reads the help page and
+   * gets nowhere. The reported symptom was exactly that. Neither code may ever
+   * mention the playlist.
+   */
+  storage_blocked: {
+    en: "Your browser is blocking this site from saving the game. Turn off private browsing, or allow site data for guessong.app, then try again.",
+    zh: "你的瀏覽器不讓這個網站儲存遊戲資料。請關閉無痕模式，或允許 guessong.app 儲存網站資料，然後再試一次。",
+  },
+  client_error: {
+    en: "The game screen hit an error and stopped. Starting over usually clears it — nothing is lost, the playlist just loads again.",
+    zh: "遊戲畫面出錯停住了。重新開始通常就會恢復，不會遺失任何東西，歌單會重新載入一次。",
   },
 
   buzzer_not_configured: {
