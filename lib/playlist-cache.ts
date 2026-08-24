@@ -146,6 +146,39 @@ const HOUR_REFUSED_PREFIX = "spotify:budget:refused";
 const DAILY_SPENT_KEY = "spotify:budget:spent";
 
 /**
+ * The same trick one step earlier: written when the day's spend crosses
+ * BUDGET_WARN_RATIO, read by `getSpotifyServiceStatus` in the same `mget`.
+ *
+ * The notice this drives fires while the site still works, which is the whole
+ * point — a host who learns at the refusal has already lost the choice the
+ * warning gives them. It cannot be answered by counting buckets in the status
+ * route for the reason DAILY_SPENT_KEY gives, and it must not cost a second
+ * command either, so the gate leaves this behind on the pass it was already
+ * making.
+ *
+ * Same hour-boundary TTL as the spent flag, and for the same reason: an hour
+ * rolling out of the window is the only thing that can lower the answer.
+ */
+const DAILY_NEAR_KEY = "spotify:budget:near";
+
+/**
+ * How much of the day's allowance has to be gone before hosts are warned.
+ *
+ * 0.8 of 2,000 is 1,600 loads. Against a normal day's ~2,152 cold loads that
+ * trips most evenings, which is deliberate: the warning is only worth anything
+ * on the days the limit is actually in play, and those are most of them. Set it
+ * higher to warn later and less often.
+ */
+const DEFAULT_BUDGET_WARN_RATIO = 0.8;
+
+function budgetWarnRatio(): number {
+  const configured = Number(process.env.SPOTIFY_BUDGET_WARN_RATIO);
+  return Number.isFinite(configured) && configured > 0 && configured < 1
+    ? configured
+    : DEFAULT_BUDGET_WARN_RATIO;
+}
+
+/**
  * Loads allowed upstream per rolling 24h, before we start refusing on
  * Spotify's behalf.
  *
@@ -403,6 +436,15 @@ async function claimDailyBudget(now: Date): Promise<boolean> {
       `${HOUR_BUDGET_PREFIX}:${hourBucket(now)}`,
       HOUR_BUCKET_TTL_SECONDS
     );
+
+    // `used` is already in hand from the admission check above, so the warning
+    // costs one conditional set on the crossing loads and nothing at all on the
+    // rest of the day. Counting it separately in the status route is what this
+    // exists to avoid.
+    if (used + 1 >= dailyLoadLimit() * budgetWarnRatio()) {
+      const frees = secondsToNextHour(now);
+      await store.set(DAILY_NEAR_KEY, { until: now.getTime() + frees * 1000 }, frees);
+    }
     return true;
   } catch {
     return true;
@@ -560,6 +602,7 @@ export type { SpotifyServiceStatus };
 
 const OPEN_STATUS: SpotifyServiceStatus = {
   throttled: false,
+  approachingLimit: false,
   code: null,
   retryAfterSeconds: 0,
 };
@@ -575,11 +618,13 @@ export async function getSpotifyServiceStatus(): Promise<SpotifyServiceStatus> {
   // banner on a site that is, as far as anyone can tell, fine.
   let cooldown: { until: number } | null = null;
   let spent: { until: number } | null = null;
+  let near: { until: number } | null = null;
   try {
     const store = await getKvStore();
-    [cooldown, spent] = await store.mget<{ until: number }>([
+    [cooldown, spent, near] = await store.mget<{ until: number }>([
       COOLDOWN_KEY,
       DAILY_SPENT_KEY,
+      DAILY_NEAR_KEY,
     ]);
   } catch {
     return OPEN_STATUS;
@@ -594,6 +639,7 @@ export async function getSpotifyServiceStatus(): Promise<SpotifyServiceStatus> {
   if (cooling > 0) {
     return {
       throttled: true,
+      approachingLimit: false,
       code: cooldownError(cooling).code,
       retryAfterSeconds: cooling,
     };
@@ -603,8 +649,24 @@ export async function getSpotifyServiceStatus(): Promise<SpotifyServiceStatus> {
   if (rationed > 0) {
     return {
       throttled: true,
+      approachingLimit: false,
       code: "spotify_daily_budget_spent",
       retryAfterSeconds: rationed,
+    };
+  }
+
+  // Only reached when nothing is actually refusing. A refusal outranks the
+  // warning it grew out of: "you are about to run out" is the wrong sentence to
+  // show someone who already has, and `approachingLimit` stays false above so
+  // no caller has to decide which of two live states to render.
+  if (remainingOf(near) > 0) {
+    return {
+      throttled: false,
+      approachingLimit: true,
+      code: "spotify_budget_low",
+      // Nothing to wait for — the site works. See the message's own note on why
+      // it carries no countdown.
+      retryAfterSeconds: 0,
     };
   }
 

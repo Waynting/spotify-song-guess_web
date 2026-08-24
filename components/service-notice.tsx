@@ -1,15 +1,24 @@
 "use client";
 
 /**
- * A one-time popup telling a host that new playlists are not loading, shown
- * before they paste a link rather than after they press Start.
+ * A one-time popup about the shared Spotify allowance, shown before a host
+ * pastes a link rather than after they press Start.
  *
- * Driven by `GET /api/status`, which reads the same KV cooldown key the
- * admission gate in lib/playlist-cache.ts writes. That is the whole design:
- * the notice appears when Spotify starts refusing and disappears when the key
- * expires, with nobody editing anything. A hand-written banner would need
- * someone to remember to take it down the next morning, and this codebase has
- * a long record of things that depend on someone remembering.
+ * It has two states and the difference between them is the whole feature:
+ *
+ *   - **warning** — the day's allowance is nearly spent and everything still
+ *     works. This is the one that is worth having. A host reading it at eight
+ *     o'clock can load their playlist while there is allowance for it, or pick
+ *     one that has already been played; told at ten, when the refusal lands,
+ *     they have no move left. Fires at SPOTIFY_BUDGET_WARN_RATIO.
+ *   - **blocked** — new playlists are not loading. The original notice.
+ *
+ * Driven by `GET /api/status`, which reads the same KV keys the admission gate
+ * in lib/playlist-cache.ts writes. That is the whole design: the notice appears
+ * when the allowance runs down and disappears when the keys expire, with nobody
+ * editing anything. A hand-written banner would need someone to remember to
+ * take it down the next morning, and this codebase has a long record of things
+ * that depend on someone remembering.
  *
  * Renders through a portal into document.body for the reason
  * components/changelog-modal.tsx documents: the landing pages' `.fade-in`
@@ -23,6 +32,7 @@ import { errorMessage, type ErrorLocale } from "@/lib/error-messages";
 import { useErrorLocale } from "@/lib/use-error-locale";
 import {
   NOTICE_DISMISS_KEY,
+  noticeState,
   SELF_HOST_URL,
   SERVICE_NOTICE_UI,
   shouldShowNotice,
@@ -139,13 +149,15 @@ export function ServiceNotice({ locale: forced }: ServiceNoticeProps = {}) {
     };
   }, [open, close]);
 
-  if (!open || !status?.code) return null;
+  const state = noticeState(status);
+  if (!open || !state || !status?.code) return null;
 
   const ui = SERVICE_NOTICE_UI[locale];
-  // Params are passed for both codes. `spotify_cooldown` renders the seconds;
-  // `spotify_quota_exhausted` carries no {seconds} placeholder on purpose (a
-  // countdown measured in hours is a promise the app cannot keep) so the same
-  // call is correct for both. See lib/error-messages.ts.
+  // Params are passed for every code. `spotify_cooldown` renders the seconds;
+  // `spotify_quota_exhausted` and `spotify_budget_low` carry no {seconds}
+  // placeholder on purpose — a countdown measured in hours is a promise the app
+  // cannot keep, and the warning is a level with nothing to count down to — so
+  // the same call is correct for all of them. See lib/error-messages.ts.
   const body = errorMessage(status.code, locale, {
     params: { seconds: status.retryAfterSeconds },
   });
@@ -249,7 +261,7 @@ export function ServiceNotice({ locale: forced }: ServiceNoticeProps = {}) {
             lineHeight: 1.15,
           }}
         >
-          {ui.title}
+          {ui.title[state]}
         </h2>
         <p
           id="sn-body"

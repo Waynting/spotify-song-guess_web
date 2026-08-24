@@ -49,6 +49,31 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.7.4",
+    date: "2026-08-24",
+    headline:
+      "Fixed the error screen that could replace a whole game, and the site now warns you before the day's playlist allowance runs out rather than after.",
+    headlineZh:
+      "修好了會讓整場遊戲變成錯誤畫面的問題，另外網站現在會在當天歌單額度快用完之前先提醒你，而不是等到用完才說。",
+    changes: [
+      {
+        kind: "fixed",
+        text: "Pressing Start could end on \u201cApplication error: a client-side exception has occurred\u201d, with nothing to click and nothing to read. It is gone, and if anything else ever breaks that way you now get a real message and a Start over button instead of a blank page.",
+        textZh: "以前按下開始有可能整頁變成「Application error」的錯誤訊息，沒有東西可以點、也看不懂發生什麼事。這個問題已經修好了，而且之後就算真的出錯，你會看到一段看得懂的說明和一個「重新開始」按鈕，不會再是一片空白。",
+      },
+      {
+        kind: "fixed",
+        text: "If your browser blocks websites from saving data, the game used to tell you the playlist could not be loaded \u2014 so you would swap playlists all evening and never get anywhere. It now says it is your browser, and what to change.",
+        textZh: "如果你的瀏覽器不讓網站儲存資料，以前遊戲會說歌單載入失敗，害你整晚一直換歌單卻怎麼樣都開不了。現在它會直接告訴你是瀏覽器設定的問題，也會說要改哪裡。",
+      },
+      {
+        kind: "new",
+        text: "Everyone here shares one Spotify allowance, and it can run out on a busy day. When it gets close, you now see a heads-up while the site still works, so you can load your playlist before it matters. Playlists that have already been played are never affected.",
+        textZh: "這裡的每個人共用同一份 Spotify 額度，忙碌的一天有可能會用完。現在快用完的時候，你會在網站還正常運作的時候先看到提醒，可以趁還有額度的時候先把歌單載入。已經玩過的歌單完全不受影響。",
+      },
+    ],
+  },
+  {
     version: "1.7.3",
     date: "2026-08-23",
     headline:

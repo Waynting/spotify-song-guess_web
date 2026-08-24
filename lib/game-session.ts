@@ -164,6 +164,52 @@ export function countRoundsPlayed(currentIndex: number, phase: string): number {
 }
 
 /**
+ * Read one entry of `tracks` back, repairing what can be repaired and dropping
+ * what cannot.
+ *
+ * This replaces a blind `as Track[]` cast, and the cast is what took the site
+ * down: the game page reads `t.artists[0]` in its preview-prefetch effect on
+ * mount, so a single entry without an `artists` array threw a TypeError there,
+ * and — with no error boundary anywhere in `app/` — React unmounted the whole
+ * tree and Next replaced the party with "Application error: a client-side
+ * exception has occurred". The host had done nothing wrong and had nothing to
+ * click.
+ *
+ * The split between repairing and dropping follows the same rule as the
+ * `GAME_MODES` / `PLAYLIST_SOURCES` guards above: a payload already sitting in
+ * a host's sessionStorage must keep playing across a deploy rather than fail to
+ * parse mid-party.
+ *
+ * - `id` and `name` are dropped when missing. Nothing can look up a clip for a
+ *   track with no id, and a round with no title has no answer to reveal.
+ * - `artists` and `durationMs` are repaired. An unnamed credit still plays, and
+ *   `durationMs` is only ever a matching signal for lib/preview-cache.ts, so
+ *   losing it costs one song's cover-detection rather than the song.
+ */
+function normalizeTrack(value: unknown): Track | null {
+  if (typeof value !== "object" || value === null) return null;
+  const t = value as Record<string, unknown>;
+  if (typeof t.id !== "string" || typeof t.name !== "string") return null;
+
+  const artists = Array.isArray(t.artists)
+    ? t.artists.filter((a): a is string => typeof a === "string")
+    : [];
+  const contributors = Array.isArray(t.contributors)
+    ? t.contributors.filter((c): c is string => typeof c === "string")
+    : undefined;
+
+  return {
+    ...(t as unknown as Track),
+    id: t.id,
+    name: t.name,
+    artists,
+    durationMs: typeof t.durationMs === "number" ? t.durationMs : 0,
+    createdAt: typeof t.createdAt === "string" ? t.createdAt : "",
+    ...(contributors ? { contributors } : {}),
+  };
+}
+
+/**
  * Parse a raw sessionStorage string into a GamePayload.
  * Returns null when the JSON is invalid or has no usable track list.
  * Old payloads (pre playlistSource/mode) get backward-compatible defaults.
@@ -178,8 +224,18 @@ export function parseGamePayload(raw: string): GamePayload | null {
   if (typeof data !== "object" || data === null) return null;
 
   const d = data as Record<string, unknown>;
-  const tracks = Array.isArray(d.tracks) ? (d.tracks as Track[]) : [];
-  const players = Array.isArray(d.players) ? (d.players as GamePlayer[]) : [];
+  const tracks = Array.isArray(d.tracks)
+    ? d.tracks.map(normalizeTrack).filter((t): t is Track => t !== null)
+    : [];
+  const players = Array.isArray(d.players)
+    ? d.players
+        .filter((p): p is GamePlayer => typeof p === "object" && p !== null)
+        .map((p) => ({
+          name: typeof p.name === "string" ? p.name : "",
+          score: typeof p.score === "number" ? p.score : 0,
+        }))
+        .filter((p) => p.name !== "")
+    : [];
 
   const rawMeta = d.mixedPlaylistMeta as Record<string, unknown> | undefined;
   const mixedPlaylistMeta: MixedPlaylistMeta | undefined =

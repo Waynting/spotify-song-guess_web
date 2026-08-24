@@ -6,15 +6,14 @@ import type { Track } from "@/types";
 import { trackEvent, type PlaylistSource } from "@/lib/analytics";
 import { canInstall, promptInstall } from "@/lib/pwa";
 import {
-  parseGamePayload,
   countRoundsPlayed,
   mergeRoomRoster,
-  GAME_STORAGE_KEY,
   type GameMode,
   type GamePlayer as Player,
   type BuzzerRoomHandle,
   type MixedPlaylistMeta,
 } from "@/lib/game-session";
+import { loadGame } from "@/lib/game-storage";
 import { fetchPreview, fetchPreviewBatch } from "@/lib/preview-client";
 import { isPreviewSettled, type PreviewBatchTrack } from "@/types/preview";
 import { BuzzerHostPanel, type BuzzerControls } from "@/components/buzzer-host-panel";
@@ -212,9 +211,10 @@ export default function GamePage() {
   }
 
   useEffect(() => {
-    const raw = sessionStorage.getItem(GAME_STORAGE_KEY);
-    if (!raw) { router.push("/"); return; }
-    const data = parseGamePayload(raw);
+    // Guarded, because a browser with site data switched off throws on the
+    // read rather than returning null — and this effect has no try of its own,
+    // so the throw took the whole page down. See lib/game-storage.ts.
+    const data = loadGame();
     if (!data || data.tracks.length === 0) { router.push("/"); return; }
     setTracks(data.tracks);
     setPlayers(data.players);
@@ -1627,7 +1627,7 @@ export default function GamePage() {
               <div>
                 <div className="track-reveal">
                   <p className="track-name">{currentTrack?.name}</p>
-                  <p className="track-artist">{currentTrack?.artists.join(", ")}</p>
+                  <p className="track-artist">{currentTrack?.artists?.join(", ")}</p>
                   {currentTrack?.albumName && (
                     <p style={{ fontSize: "13px", color: "#666", marginTop: "6px" }}>
                       {currentTrack.albumName}

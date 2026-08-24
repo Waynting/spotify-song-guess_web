@@ -108,6 +108,41 @@ describe("the message table", () => {
     }
   });
 
+  /**
+   * The two codes that are about the *browser*, not the playlist and not the
+   * quota. This is the reported bug, pinned: a host whose browser refuses to
+   * store the game was shown `playlist_load_failed` — "Couldn't load that
+   * playlist" — because the write sat inside the same try/catch as the fetch,
+   * so they spent the evening swapping links that were never the problem and
+   * reading a help page that could not help them. Same class of mistake as
+   * telling a throttled host to check their URL was public, and a translation
+   * is exactly where it comes back.
+   */
+  it("never sends a browser failure looking for a playlist problem", () => {
+    for (const code of ["storage_blocked", "client_error"] as const) {
+      expect(ERROR_MESSAGES[code].en, `${code}.en blames the playlist`).not.toMatch(
+        /playlist (url|link)|public|spotify/i
+      );
+      expect(ERROR_MESSAGES[code].zh, `${code}.zh blames the playlist`).not.toMatch(
+        /公開|連結/
+      );
+    }
+  });
+
+  /**
+   * `spotify_budget_low` is the one entry here that is not a refusal: it fires
+   * while the site still works, so a host can act while acting is still worth
+   * something. If it reads like the refusal it predicts, it drives them away
+   * from a site that would have worked for them — strictly worse than staying
+   * quiet. Both languages have to say the site is still up.
+   */
+  it("makes the budget warning say nothing is broken yet", () => {
+    expect(ERROR_MESSAGES.spotify_budget_low.en).toMatch(/still works/i);
+    expect(ERROR_MESSAGES.spotify_budget_low.zh).toMatch(/都還正常/);
+    // A level, not a wait. See the {seconds} placeholder pin above.
+    expect(placeholders(ERROR_MESSAGES.spotify_budget_low.en)).toEqual([]);
+  });
+
   it("covers every code the buzzer Worker can send", () => {
     // The Worker ships its own copy of lib/buzzer-protocol.ts and cannot import
     // this table, so nothing but this test connects the two.
