@@ -325,6 +325,28 @@ export type AnalyticsEvent =
        */
       name: "player_to_host_click";
       params: { surface: LoopSurface };
+    }
+  | {
+      /**
+       * A client-side exception reached an error boundary.
+       *
+       * Until `app/error.tsx` existed there was no boundary at all, so a throw
+       * anywhere in the tree replaced the party with Next's default
+       * "Application error" screen — and nothing anywhere recorded that it had
+       * happened. The one crash we know about arrived as an email, weeks later,
+       * from a host who had already given up.
+       *
+       * `boundary` is where it was caught, not what threw: `route` is the
+       * segment boundary (a page or one of its effects), `root` is
+       * `global-error.tsx`, which only fires when the root layout itself is the
+       * thing that broke. Deliberately no message, stack or digest — the
+       * convention this file keeps is bucketed enums, never upstream strings,
+       * and a stack frame carries pasted playlist names and query params into
+       * GA4. The digest goes to `console.error` on the device instead, which is
+       * where the person reading it already is.
+       */
+      name: "client_error";
+      params: { boundary: "route" | "root" };
     };
 
 export type AnalyticsEventName = AnalyticsEvent["name"];
