@@ -100,7 +100,9 @@ cp .env.example .env.local
 | `NEXT_PUBLIC_BUZZER_WS_URL` | Buzzer Mode only | `ws://127.0.0.1:8787` locally, `wss://guesssong-buzzer.<subdomain>.workers.dev` in production. Unset → the Buzzer Mode toggle is hidden. |
 | `NEXT_PUBLIC_BASE_URL` | Optional | Defaults to `https://www.guessong.app`. |
 | `NEXT_PUBLIC_GA_MEASUREMENT_ID` | Optional | Injects GA4 when set. Events no-op outside production regardless. |
-| `SPOTIFY_MAX_LOADS_PER_MINUTE` | Optional | Global ceiling on uncached Spotify playlist loads. Default `40`. |
+| `SPOTIFY_MAX_LOADS_PER_MINUTE` | Optional | Global ceiling on uncached Spotify playlist loads, per minute. Default `40`. |
+| `SPOTIFY_MAX_LOADS_PER_DAY` | Optional | Global ceiling per rolling 24h, counted in hourly buckets. Default `2000`. This is the one that stops Spotify's daily app quota being spent in an afternoon — see [Caching and admission control](#caching-and-admission-control). |
+| `SPOTIFY_BUDGET_WARN_RATIO` | Optional | How much of the daily ceiling has to be gone before hosts see the heads-up popup. Default `0.8`. Raise it to warn later and less often. |
 | `PREVIEW_MAX_LOOKUPS_PER_MINUTE` | Optional | Global ceiling on iTunes/Deezer lookups. Default `120`. |
 | `DEV_ORIGINS` | Optional, dev only | Comma-separated LAN hostnames (no scheme, no port) added to `allowedDevOrigins`. Needed to test from a phone. |
 
@@ -175,13 +177,15 @@ app/
   share/                     Web Share Target handler + /share/unsupported explainer
   icons/[size]/              PWA icons, prerendered at build (never per request)
   api/                       See the table below
+  error.tsx, global-error.tsx  Error boundaries — see "When the client throws" below
   icon.tsx, opengraph-image.tsx, robots.ts, sitemap.ts
 components/                  Buzzer button + host panel, room panel, mixed collector,
-                             install banner, changelog modal, ui/ (shadcn primitives)
+                             install banner, changelog modal, service notice,
+                             crash screen, ui/ (shadcn primitives)
 lib/                         All shared logic — see "Architecture" below
 worker/                      Cloudflare Worker + BuzzerRoom Durable Object
-tests/                       22 Vitest files, 366 cases
-types/                       Track, room, and preview wire types
+tests/                       31 Vitest files, 567 cases
+types/                       Track, room, preview, and service-status wire types
 ```
 
 ## API Routes
@@ -197,6 +201,7 @@ Every route is IP rate limited (`lib/rate-limit.ts`) with a fixed window; limits
 | `/api/room/[code]/submit` | POST | `{playerName, playlistUrl}` → `{ok, trackCount}`. | 20 / 10 min |
 | `/api/room/[code]/status` | GET | Who has submitted so far (host polls every 4s). | 200 / 10 min |
 | `/api/room/[code]/pool` | GET | `?sampledPerPlayer=N` + `x-host-token` header → the sampled, deduped pool. One-shot consume. | 20 / 10 min |
+| `/api/status` | GET | `{throttled, approachingLimit, code, retryAfterSeconds}` — how much of the shared Spotify allowance is left. One KV read, never touches Spotify. Drives the site notice. | 120 / 10 min |
 | `/share` | GET | Web Share Target — extracts a playlist from shared text and redirects to `/?playlist=…`. | — |
 | `/icons/[size]` | GET | Generated PWA icons (`192`, `512`, `maskable`). | — |
 
@@ -226,6 +231,26 @@ Spotify throttles per **client ID**, so every visitor shares one budget — per-
 
 Vercel pins WebSocket connections to a single function instance with no guarantee a second connection lands on the same one — there's nothing to broadcast a room to. So live rooms run on Cloudflare instead. The host `POST`s to the Worker's `/rooms`, which generates a 4-character code from an ambiguity-free alphabet and claims a Durable Object by that name; the DO *is* the registry, so a non-null return is the collision check. Players connect to `/rooms/:code/ws`, and ordering is decided by the DO's single-threaded execution — no locks, no CAS. Verdicts stay human: the room decides *who* was first, a person decides *whether* they were right. Max 12 players, 3h idle timeout.
 
+### When the client throws
+
+The app had no error boundary anywhere in `app/`, which meant any uncaught client-side error — a mount effect, a chunk that failed to load, a stored payload that could not be read — replaced the whole page with Next's default: *"Application error: a client-side exception has occurred (see the browser console for more information)."* For a host with a room full of people waiting, that sentence names no cause, offers no action, and its only instruction is to open a developer console. It also reported nothing, so the first anyone heard of a crash was an email weeks later.
+
+`app/error.tsx` and `app/global-error.tsx` now catch both levels and render `components/crash-screen.tsx`: a bilingual message saying the site broke rather than the playlist, a **Start over** button that clears the stored game and returns to setup, a **Try again** that re-runs the render, and Next's error `digest` printed as a reference a bug report can quote. Every catch fires the `client_error` analytics event, bucketed by which boundary caught it — never the message or the stack, which would carry pasted playlist URLs into GA4.
+
+Two hardenings sit underneath, both on the path from Start to `/game`:
+
+- **The stored game is validated, not cast.** `parseGamePayload` used to `as Track[]` whatever JSON came back, so one malformed entry reached the render and threw. It now repairs what it can (a missing `artists` becomes `[]`, a missing `durationMs` becomes `0`) and drops only what nothing can play — no `id`, no `name`. The repair-or-drop split is the same rule the `GAME_MODES` guard follows: a game already sitting in a host's sessionStorage has to keep playing across a deploy.
+- **Storage is guarded on both sides.** `sessionStorage` *throws* rather than returning null in a locked-down browser (Safari with "Block All Cookies", several embedded webviews), and the throw is on the property access itself. `lib/game-storage.ts` is now the only way the payload is written and read. A refused write is reported as `storage_blocked` — it used to sit inside the same `try` as the playlist fetch and surface as "Couldn't load that playlist", which sent hosts off to swap links that were never the problem.
+
+### The site notice
+
+`components/service-notice.tsx` is a one-time popup about the shared Spotify allowance, shown before a host pastes a link rather than after they press Start. It has two states, and the earlier one is the point:
+
+- **warning** — the day's allowance is nearly spent and everything still works. Fires at `SPOTIFY_BUDGET_WARN_RATIO` (default 0.8). A host reading this at eight can load their playlist while there is allowance for it; told at ten, when the refusal lands, they have no move left.
+- **blocked** — new playlists are not loading, because Spotify is refusing us or we are rationing ourselves.
+
+Both read `GET /api/status`, which reads the same KV keys the admission gate writes — so the notice appears and disappears on its own, with nobody remembering to take a banner down. The threshold is evaluated on the pass `claimDailyBudget` was already making, and the status route still costs exactly one KV read; summing 24 hourly buckets there would have made the notice more expensive than the gate it reports on. Dismissal is keyed by error code, not a flag, so waving away the warning does not silence the refusal it predicted.
+
 ### Error messages
 
 `lib/error-messages.ts` is the only place a user-visible error string exists — one code union and one `{en, zh}` table, so a missing translation is a compile error. The server sends `{error, code}` and the client picks the language from the device locale. Localising server-side would be wrong: one room is read by several devices, and cached 404s would freeze one language into the cache for everyone.
@@ -237,7 +262,7 @@ Two hand-written changelogs, and a release updates both: [`CHANGELOG.md`](./CHAN
 ## Testing
 
 ```bash
-npm test              # 17 files, 273 cases — vitest, jsdom
+npm test              # 31 files, 567 cases — vitest, jsdom
 cd worker && npm test # Durable Object tests inside workerd
 ```
 

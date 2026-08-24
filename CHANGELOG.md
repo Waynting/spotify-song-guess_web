@@ -5,6 +5,164 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.4] - 2026-08-24
+
+A host wrote in: the site loads, they paste a playlist, they press Start, and
+the page becomes
+
+> Application error: a client-side exception has occurred while loading
+> www.guessong.app (see the browser console for more information).
+
+Chrome and Safari both. Several different public playlists. They read every
+troubleshooting page on the site and found nothing, which is the part worth
+sitting with — there was nothing to find, because the message names no cause,
+offers no action, and its one instruction is to open a developer console.
+
+`POST /api/playlist` was answering 200 with a valid track list throughout. The
+failure was entirely on the client, and the reason it could take the whole page
+down is that **`app/` had no error boundary anywhere in it**. Any throw, from
+any component or effect, unmounted the tree and fell through to Next's default
+screen. Nothing recorded it either: the first anyone heard was the email.
+
+So this release does two things — removes the throws that were reachable on the
+path from Start to `/game`, and makes sure the next one that is not reachable
+today lands somewhere a host can act on.
+
+### Fixed
+
+- **The game payload is validated on the way out of sessionStorage**
+  (`lib/game-session.ts`). `parseGamePayload` cast `d.tracks` with
+  `as Track[]` — a blind cast, sitting in a module whose every other field goes
+  through a guard. `app/game/page.tsx`'s preview-prefetch effect dereferences
+  `t.artists[0]` on mount, so a single entry without an `artists` array was a
+  `TypeError` inside an effect with no `try` of its own. Reproduced against the
+  production build: it renders exactly the reported sentence.
+
+  `normalizeTrack` now repairs what a game can play without and drops only what
+  it cannot. `artists` becomes `[]` and `durationMs` becomes `0`; a track with
+  no `id` or no `name` is dropped, because nothing can look up a clip for the
+  first and there is no answer to reveal for the second. Players get the same
+  treatment — a nameless entry is dropped rather than rendered as a blank
+  scoreboard row. The repair-or-drop split is the rule `GAME_MODES` and
+  `PLAYLIST_SOURCES` already follow, and for the same reason: a payload sitting
+  in a host's sessionStorage at deploy time has to keep playing.
+
+- **Every read and write of the payload is guarded** (`lib/game-storage.ts`,
+  new). `sessionStorage` *throws* rather than returning null in a locked-down
+  browser — Safari with "Block All Cookies", Chrome with site data disallowed,
+  several embedded webviews — and it throws on the property access itself, so
+  the `try` has to wrap the access and not just the call. `lib/host-session.ts`
+  has documented this since it was written and guards everything it owns; the
+  game payload was the one path that did not. `app/game/page.tsx:215` read the
+  key bare inside a mount effect.
+
+  `saveGameTo` / `loadGameFrom` / `clearGameFrom` take the store as an argument
+  so `tests/game-storage.test.ts` can hand them one that throws, which is the
+  case no browser on a developer's desk reproduces on demand.
+
+- **A browser that refuses storage is no longer reported as a bad playlist**
+  (`app/page.tsx`, `lib/error-messages.ts`). All three `setItem` call sites sat
+  inside the same `try` as the playlist fetch, so a `SecurityError` there came
+  out of `describeError` as `playlist_load_failed` — "Couldn't load that
+  playlist". That is the same mistake as the message that used to tell
+  throttled hosts to check their URL was public, and it produces the same
+  behaviour: the host swaps playlists all evening, reads the help page, and
+  gets nowhere. Exactly what the report describes.
+
+  New code `storage_blocked` names the browser and says what to change.
+  Deliberately *not* in `isDeterministicPlaylistFailure`: the same URL will work
+  fine once the setting is changed, so the retry has to stay open.
+
+### Added
+
+- **`app/error.tsx` and `app/global-error.tsx`**, rendering
+  `components/crash-screen.tsx`. The route boundary catches everything below the
+  root layout; the global one catches the root layout itself and supplies its
+  own `<html>`/`<body>`, so nothing it renders may depend on anything the layout
+  would have loaded.
+
+  The screen says the site broke rather than the playlist, offers **Start over**
+  (clears the stored game, returns to setup — the recovery for the whole class
+  of causes, since an unreadable payload is gone the moment it is dropped),
+  **Try again** (`reset()`, for the transient half such as a chunk that failed
+  to load once), a link to the issue tracker, and Next's error `digest` as a
+  reference a bug report can quote. Bilingual through `lib/error-messages.ts`
+  like every other player-facing string.
+
+- **The `client_error` analytics event** (`lib/analytics.ts`), fired from the
+  boundary and bucketed by which boundary caught it — `route` or `root`. No
+  message, no stack, no digest: stack frames carry pasted playlist URLs and
+  query strings into GA4, which is the cardinality-and-user-input rule the rest
+  of that file already keeps. The digest goes to `console.error` on the device,
+  which is where the person reading it already is.
+
+- **The site notice now warns before it refuses** (`lib/service-notice.ts`,
+  `lib/playlist-cache.ts`, `types/service-status.ts`,
+  `components/service-notice.tsx`). 1.7.2 put a notice in front of the host, but
+  only once the allowance was already spent — by which point the only thing left
+  to tell them is to come back tomorrow.
+
+  `GET /api/status` now answers with `approachingLimit` as well as `throttled`,
+  and the notice has two states with two headlines. `warning` fires at
+  `SPOTIFY_BUDGET_WARN_RATIO` (new, default `0.8`) of `SPOTIFY_MAX_LOADS_PER_DAY`
+  and says the site still works, which is the whole point: a host reading it at
+  eight o'clock can load their playlist while there is allowance for it, or pick
+  one that is already cached. `blocked` is the existing refusal notice,
+  unchanged.
+
+  Three properties this had to have, all tested:
+
+  - **It costs nothing extra.** `claimDailyBudget` already has the day's `used`
+    in hand on every cold load, so the threshold is a conditional `set` on the
+    crossing loads and nothing on the rest; `getSpotifyServiceStatus` reads the
+    flag as one more key in the `mget` it already spends.
+    `tests/playlist-cache.test.ts` counts the reads — summing 24 hourly buckets
+    in the status route would have made the notice more expensive than the gate
+    it reports on, which is the trap `DAILY_SPENT_KEY` was built to avoid one
+    step earlier.
+  - **A refusal outranks the warning it grew out of.** `throttled` and
+    `approachingLimit` are never both true. "You are about to run out" tells
+    someone who already has that the site still works.
+  - **The two headlines are different sentences.** "New playlists aren't
+    loading" is false during a warning, and a host who reads it walks away from
+    a site that would have worked for them — strictly worse than staying quiet.
+    Dismissal stays keyed by error code, so waving away `spotify_budget_low` at
+    eight does not silence `spotify_daily_budget_spent` at ten.
+
+### Documentation
+
+- `CLAUDE.md` gains two sections: **A client-side throw must never be a dead
+  end** (why the boundaries exist, and the three rules on the Start → `/game`
+  path) and **The site notice warns before it refuses**.
+- `README.md`: new **When the client throws** and **The site notice** sections;
+  `/api/status` added to the route table, which had never listed it;
+  `SPOTIFY_MAX_LOADS_PER_DAY` added to the environment table, which had never
+  listed it either; test and file counts corrected (they said 17 files / 273
+  cases against an actual 31 / 567).
+- `.env.example`: the three Spotify budget knobs and
+  `PREVIEW_MAX_LOOKUPS_PER_MINUTE` documented; dropped the note about "the 3
+  built-in trial playlists", which have not existed since 1.5.0.
+
+### Known gaps
+
+- **The reported crash is fixed by construction, not by reproduction.** The
+  malformed-track path was reproduced against the production build and produces
+  the reported sentence exactly; the storage-blocked path was reproduced with
+  `sessionStorage` overridden to throw. Which of the two that host hit is not
+  known, and a third cause reaching the same screen is not ruled out — a chunk
+  that fails to load mid-navigation would look identical. `client_error` is
+  there so the next one is a number rather than an email. That the reporter had
+  the same failure in Chrome *and* Safari is consistent with iOS, where both are
+  WebKit, and no WebKit engine was available here to test against.
+- **`app/error.tsx` cannot catch a throw during a server render**, and neither
+  boundary catches an unhandled promise rejection. Neither is reachable on the
+  path this release is about, but neither is impossible.
+- **The warning threshold has never run against real traffic.** 0.8 of 2,000 is
+  1,600 loads, and a normal day is ~2,152 cold loads, so it should trip most
+  evenings. If it turns out to trip at lunchtime every day it becomes wallpaper;
+  `SPOTIFY_BUDGET_WARN_RATIO` is retunable from Vercel without a deploy for
+  exactly that reason.
+
 ## [1.7.3] - 2026-08-23
 
 1.7.2 put the notice in front of the host before they paste a link. It said the

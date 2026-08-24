@@ -144,6 +144,7 @@ NEXT_PUBLIC_GA_MEASUREMENT_ID               # Optional — enables GA4
 NEXT_PUBLIC_ADSENSE_CLIENT_ID               # Optional — AdSense publisher id, defaults to ca-pub-2238954049312975
 SPOTIFY_MAX_LOADS_PER_MINUTE                # Optional — global upstream burst ceiling, default 40
 SPOTIFY_MAX_LOADS_PER_DAY                   # Optional — global ceiling per rolling 24h, default 2000
+SPOTIFY_BUDGET_WARN_RATIO                   # Optional — fraction of the daily ceiling that triggers the heads-up notice, default 0.8
 PREVIEW_MAX_LOOKUPS_PER_MINUTE              # Optional — global iTunes/Deezer ceiling, default 120
 ```
 
@@ -177,6 +178,73 @@ Four things `tests/error-messages.test.ts` will catch, all easy to do by acciden
 - **The two quota codes must say the app is free, that the quota is not for sale, and where to go instead** — in both languages. A host told only "the allowance is gone" is left with two readings and both are wrong: that nobody is looking after the site, or that money would fix it. Spotify sells no bigger quota to a project this size, so an apology and an honest account is the whole of what is on offer, and the open-source line is the only real remedy in it. `components/service-notice.tsx` renders that last part as a link (`SELF_HOST_URL`) rather than prose, because the same string is also shown as plain text under the Start button where nothing is clickable. The test pins apology, "free" and "open source" on both `spotify_quota_exhausted` and `spotify_daily_budget_spent`, in `en` *and* `zh` — a translation is where the awkward second half of a sentence gets dropped.
 
 The buzzer Worker keeps its own wire codes (`BuzzerErrorCode` in `lib/buzzer-protocol.ts`, which is shared verbatim with the Worker and must stay dependency-free). `BUZZER_ERROR_CODES` maps them onto app codes — that mapping is the only thing connecting the two, so a new wire code needs an entry there.
+
+## A client-side throw must never be a dead end
+
+`app/error.tsx` and `app/global-error.tsx` exist because there was no error
+boundary anywhere in `app/`, and the cost of that is on record: an uncaught
+throw on the path from Start to `/game` replaced a host's party with Next's
+default — *"Application error: a client-side exception has occurred (see the
+browser console for more information)"* — which names no cause, offers no
+action, and reported nothing anywhere. It was found from a user email, not from
+telemetry. **Deleting either boundary restores that**, and nothing on screen
+will say so until the next report arrives.
+
+Three rules hold the Start → `/game` path together, and each replaces something
+that shipped:
+
+- **`parseGamePayload` validates the track list; it must never go back to
+  `as Track[]`.** The game page dereferences `t.artists[0]` in its
+  preview-prefetch effect on mount, so one entry without an `artists` array was
+  a TypeError there and the whole page died. `normalizeTrack` repairs what a
+  game can play without (`artists` → `[]`, `durationMs` → `0`) and drops only
+  what it cannot (no `id`, no `name`). That split is the same rule `GAME_MODES`
+  follows and for the same reason: a payload already in a host's sessionStorage
+  has to keep playing across a deploy, not fail to parse mid-party.
+- **`lib/game-storage.ts` is the only path to the game payload.**
+  `sessionStorage` *throws* rather than returning null in a locked-down browser
+  — Safari with "Block All Cookies", several embedded webviews — and the throw
+  is on the property access itself, which is why the `try` wraps the access and
+  not just the call. `lib/host-session.ts` documented this and guarded
+  everything it owned; this payload was the one path that did not.
+- **A refused write is `storage_blocked`, never `playlist_load_failed`.** The
+  write used to sit inside the same `try` as the playlist fetch, so a browser
+  refusing storage was reported as a bad playlist — the same class of mistake as
+  telling a throttled host to check their URL was public, and it produced the
+  same behaviour: a host swapping playlists all evening and reading the help
+  page. `tests/error-messages.test.ts` pins that neither of the two browser
+  codes mentions the playlist.
+
+The boundary reports through `client_error` in `lib/analytics.ts`, bucketed by
+which boundary caught it. **No message, stack or digest may join those params** —
+stack frames carry pasted playlist URLs and query strings, which is exactly the
+cardinality-and-user-input rule the rest of that file keeps. The digest goes to
+`console.error` and onto the crash screen, where the person who can quote it
+already is.
+
+## The site notice warns before it refuses
+
+`components/service-notice.tsx` has two states and the earlier one is the
+feature. `warning` fires at `SPOTIFY_BUDGET_WARN_RATIO` of the daily ceiling
+while the site still works; `blocked` is the original refusal notice. A host who
+is told only at the refusal has already lost the choice the warning gives them —
+load the playlist now, or pick one that is already cached.
+
+- **The threshold is evaluated where `used` is already in hand.**
+  `claimDailyBudget` has the day's count on every cold load, so the warning
+  costs one conditional `set` on the crossing loads and nothing on the rest.
+  `getSpotifyServiceStatus` reads the flag as one more key in the `mget` it
+  already spends. Answering it by summing 24 hourly buckets in the status route
+  would make the notice more expensive than the gate it reports on — the same
+  reasoning `DAILY_SPENT_KEY` records, one step earlier.
+- **`throttled` and `approachingLimit` are never both true.** A live refusal
+  outranks the warning it grew out of: "you are about to run out" tells someone
+  who already has that the site still works.
+- **The two headlines must stay different sentences.** "New playlists aren't
+  loading" is false during a warning, and a host who reads it walks away from a
+  site that would have worked for them — strictly worse than not warning at all.
+  `tests/service-notice.test.ts` pins that, and pins that dismissing
+  `spotify_budget_low` does not silence the refusal that follows it.
 
 ## Analytics
 
