@@ -19,7 +19,8 @@ import {
 } from "@/lib/error-messages";
 import { useErrorLocale } from "@/lib/use-error-locale";
 import { ServiceNotice } from "@/components/service-notice";
-import { buildGamePayload, GAME_STORAGE_KEY } from "@/lib/game-session";
+import { buildGamePayload } from "@/lib/game-session";
+import { saveGame } from "@/lib/game-storage";
 import { isBuzzerConfigured } from "@/lib/buzzer-client";
 import type { OpenRoom } from "@/lib/room-client";
 import { RoomPanel } from "@/components/room-panel";
@@ -277,7 +278,9 @@ export default function SetupPage() {
         },
         ...(room ? { buzzerRoom: room } : {}),
       });
-      sessionStorage.setItem(GAME_STORAGE_KEY, JSON.stringify(payload));
+      // A browser that refuses to store this has not refused the playlist, and
+      // must not be told it did. See lib/game-storage.ts.
+      if (!saveGame(payload)) throw new AppError("storage_blocked");
       trackEvent("game_started", {
         player_count: data.players.length,
         clip_duration: clipDuration,
@@ -425,7 +428,9 @@ export default function SetupPage() {
         mode: room ? "buzzer" : "party",
         ...(room ? { buzzerRoom: room } : {}),
       });
-      sessionStorage.setItem(GAME_STORAGE_KEY, JSON.stringify(payload));
+      // A browser that refuses to store this has not refused the playlist, and
+      // must not be told it did. See lib/game-storage.ts.
+      if (!saveGame(payload)) throw new AppError("storage_blocked");
       trackEvent("game_started", {
         // Phones that scanned in, plus the host, who buzzes from the game
         // screen. The typed count is 0 for every buzzer game, so reporting it
@@ -558,7 +563,9 @@ export default function SetupPage() {
         },
         ...(room ? { buzzerRoom: room } : {}),
       });
-      sessionStorage.setItem(GAME_STORAGE_KEY, JSON.stringify(payload));
+      // A browser that refuses to store this has not refused the playlist, and
+      // must not be told it did. See lib/game-storage.ts.
+      if (!saveGame(payload)) throw new AppError("storage_blocked");
       trackEvent("game_started", {
         player_count: mixedContributions.length,
         clip_duration: clipDuration,
