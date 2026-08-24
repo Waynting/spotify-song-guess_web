@@ -22,7 +22,16 @@ const kv = vi.hoisted(() => {
   const mem = new Map<string, { value: unknown; expiresAt: number }>();
   const writes: Array<{ key: string; value: unknown; ttlSeconds: number }> = [];
   const flags = { failReads: false, failWrites: false };
-  return { mem, writes, flags };
+  /**
+   * Every read the store is asked for, counted (`kv.writes` already records
+   * the other half). Several invariants in
+   * lib/playlist-cache.ts and lib/preview-cache.ts are cost claims ("one KV
+   * read", "no counter read to compose a log line"), and a cost claim that
+   * nothing measures is the kind that regresses in a refactor without a single
+   * test going red.
+   */
+  const counts = { reads: 0 };
+  return { mem, writes, flags, counts };
 });
 
 vi.mock("@/lib/kv", () => ({
@@ -33,12 +42,14 @@ vi.mock("@/lib/kv", () => ({
   hourBucket: (at: Date = new Date()) => at.toISOString().slice(0, 13),
   getKvStore: async () => ({
     async get(key: string) {
+      kv.counts.reads++;
       if (kv.flags.failReads) throw new Error("kv unavailable");
       const entry = kv.mem.get(key);
       if (!entry || Date.now() > entry.expiresAt) return null;
       return entry.value;
     },
     async mget(keys: string[]) {
+      kv.counts.reads++;
       if (kv.flags.failReads) throw new Error("kv unavailable");
       return keys.map((key) => {
         const entry = kv.mem.get(key);
@@ -104,6 +115,7 @@ const upstreamCalls = () => upstream().mock.calls.length;
 beforeEach(() => {
   kv.mem.clear();
   kv.writes.length = 0;
+  kv.counts.reads = 0;
   kv.flags.failReads = false;
   kv.flags.failWrites = false;
   __resetInFlightForTests();
@@ -549,6 +561,7 @@ describe("getSpotifyServiceStatus", () => {
   it("reports open when nothing is parked", async () => {
     await expect(getSpotifyServiceStatus()).resolves.toEqual({
       throttled: false,
+      approachingLimit: false,
       code: null,
       retryAfterSeconds: 0,
     });
@@ -742,6 +755,80 @@ describe("rolling 24h upstream budget", () => {
     const status = await getSpotifyServiceStatus();
     expect(status).toMatchObject({ throttled: true, code: "spotify_daily_budget_spent" });
     expect(status.retryAfterSeconds).toBeGreaterThan(0);
+  });
+
+  /**
+   * The warning, and the reason it exists at all: a host who is told at the
+   * refusal has already lost the choice of loading their playlist while there
+   * was still allowance for it. At a ceiling of 3 the 0.8 ratio trips on the
+   * third load — the last one that succeeds.
+   */
+  it("warns while the site still works, before anything is refused", async () => {
+    for (let i = 0; i < 2; i++) await loadPlaylist(uniqueUrl(i));
+    await expect(getSpotifyServiceStatus()).resolves.toMatchObject({
+      throttled: false,
+      approachingLimit: false,
+      code: null,
+    });
+
+    await loadPlaylist(uniqueUrl(2));
+
+    const status = await getSpotifyServiceStatus();
+    expect(status).toMatchObject({
+      throttled: false,
+      approachingLimit: true,
+      code: "spotify_budget_low",
+    });
+    // A level, not a wait. The message carries no {seconds} for that reason.
+    expect(status.retryAfterSeconds).toBe(0);
+  });
+
+  it("is retunable without a deploy", async () => {
+    process.env.SPOTIFY_BUDGET_WARN_RATIO = "0.99";
+    try {
+      // 3 * 0.99 = 2.97, so two loads no longer reach it where 0.8 would have.
+      for (let i = 0; i < 2; i++) await loadPlaylist(uniqueUrl(i));
+      await expect(getSpotifyServiceStatus()).resolves.toMatchObject({
+        approachingLimit: false,
+      });
+    } finally {
+      delete process.env.SPOTIFY_BUDGET_WARN_RATIO;
+    }
+  });
+
+  /**
+   * The refusal replaces the warning rather than sitting alongside it. Telling
+   * a host "you are close to the limit" once they are past it says the site
+   * still works, which is the one thing it does not do.
+   */
+  it("stops warning once it is actually refusing", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+    await expect(getSpotifyServiceStatus()).resolves.toMatchObject({
+      approachingLimit: true,
+    });
+
+    await loadPlaylist(uniqueUrl(9)).catch(() => {});
+
+    await expect(getSpotifyServiceStatus()).resolves.toMatchObject({
+      throttled: true,
+      approachingLimit: false,
+      code: "spotify_daily_budget_spent",
+    });
+  });
+
+  /**
+   * The status route's whole cost claim is one KV read, and the warning must
+   * not have quietly turned that into twenty-four. Reading it is one more key
+   * in the `mget` the notice already spends.
+   */
+  it("costs the notice no extra KV reads", async () => {
+    for (let i = 0; i < 3; i++) await loadPlaylist(uniqueUrl(i));
+    const before = kv.counts.reads;
+    await getSpotifyServiceStatus();
+    // One `mget`, exactly as before the warning existed. Answering it by
+    // summing the day's hourly buckets here would have made the notice more
+    // expensive than the gate it reports on.
+    expect(kv.counts.reads - before).toBe(1);
   });
 
   /**

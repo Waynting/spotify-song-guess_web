@@ -3,10 +3,15 @@ import { getSpotifyServiceStatus } from "@/lib/playlist-cache";
 import { enforceRateLimit } from "@/lib/rate-limit";
 
 /**
- * Whether Spotify is currently refusing this app, phrased for a page rather
+ * How much of the shared Spotify allowance is left, phrased for a page rather
  * than for a request that already failed.
  *
- * Exists so a host learns the site is throttled *before* pasting a playlist
+ * Two answers, not one: `throttled` when a host pressing Start would be
+ * refused, and `approachingLimit` while the day's allowance is running down and
+ * everything still works. The second is the one that changes an evening — it
+ * reaches a host while loading a playlist is still an option.
+ *
+ * Exists so a host learns where the site stands *before* pasting a playlist
  * and pressing Start, instead of after. The alternative that was rejected is a
  * hand-written banner: the quota clears on Spotify's schedule, usually
  * overnight, and a static notice would then need someone to remember to take
@@ -14,7 +19,8 @@ import { enforceRateLimit } from "@/lib/rate-limit";
  * eventually failed silently, so the notice reads the same KV key the
  * admission gate does and disappears on its own.
  *
- * Costs one KV read, and nothing here can reach Spotify — that is the point.
+ * Costs one KV read — one `mget` over three keys, unchanged by the warning —
+ * and nothing here can reach Spotify, which is the point.
  * `getSpotifyServiceStatus` fails open, so a KV outage renders no notice
  * rather than a false one.
  */
