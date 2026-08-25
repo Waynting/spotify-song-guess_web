@@ -42,7 +42,7 @@ There *is* server-side storage, but it is deliberately narrow: a KV layer (`lib/
 |---|---|
 | `POST /api/playlist` | `{url}` → playlist name + tracks, via Spotify **Client Credentials** flow (`lib/spotify.ts`). Rejects Spotify editorial playlists (IDs starting `37i9` return 404 for new apps). |
 | `GET /api/preview` | Track/artist/id → 30s preview URL (iTunes, then Deezer). No auth required. KV-cached by track id, including negative results. `&refresh=1` re-resolves a URL that stopped playing, on its own much tighter limit. |
-| `POST /api/preview/batch` | `{tracks:[{id,name,artist}]}` → the same lookup for a whole game in one request. |
+| `POST /api/preview/batch` | `{tracks:[{id,name,artist,durationMs?}]}` → the same lookup for a whole game in one request. `durationMs` is optional so an older client still resolves; without it the pick falls back to matching on names alone. |
 | `POST /api/room` | Creates a Mixed Playlist Mode room; returns room code, host token, expiry. |
 | `POST /api/room/[code]/submit` | A player submits their playlist URL to the room. |
 | `GET /api/room/[code]/status` | Poll for who has submitted so far. |

@@ -35,7 +35,7 @@ No `.github/workflows`. Nothing runs the suite before a merge. Before opening a
 pull request:
 
 ```bash
-npm test              # 351 tests, ~1.5s
+npm test              # 32 files, 591 tests, ~1.5s
 npx tsc --noEmit
 npx eslint app lib components
 npm run build         # see the warning below
