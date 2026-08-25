@@ -49,6 +49,31 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.7.5",
+    date: "2026-08-25",
+    headline:
+      "Fixed the clip playing a different song from the one on the answer card \u2014 both the late-arriving kind and the wrong-recording kind.",
+    headlineZh:
+      "修好了播出來的音樂跟答案卡上的歌對不起來的問題，包含「慢一步才播出來」和「一開始就抓錯錄音」兩種狀況。",
+    changes: [
+      {
+        kind: "fixed",
+        text: "If you got tired of waiting on \u201cFinding audio\u2026\u201d and pressed Skip Track or Reveal Answer, the clip that was still loading could start playing on the next song, or on top of the answer you had just revealed. It is now dropped instead.",
+        textZh: "如果你等「Finding audio…」等到不耐煩，按了跳過或直接公布答案，那首還在載入的音樂有可能會接著在下一首播出來，或是蓋在你剛公布的答案上。現在它會直接被丟掉，不會再亂播。",
+      },
+      {
+        kind: "fixed",
+        text: "Songs with very common titles could play a tribute band or karaoke version instead of the real recording, which then contradicted the answer card. The check that matches the artist no longer counts a name like \u201cHello Adele Tribute\u201d as Adele.",
+        textZh: "歌名很菜市場的歌，以前有可能播出致敬樂團或卡拉 OK 版本，而不是原本那個錄音，跟答案卡對不起來。現在比對歌手的方式改過了，像「Hello Adele Tribute」這種名字不會再被當成 Adele。",
+      },
+      {
+        kind: "fixed",
+        text: "Remastered and live-tagged tracks could end up playing a different song from the same album. The title is now matched with those tags taken off, so the remaster finds its own recording.",
+        textZh: "標了 Remastered 或 Live 的歌，以前有可能播成同一張專輯裡的另一首。現在比對歌名的時候會先把這些標籤拿掉，重製版就能找回自己那個錄音。",
+      },
+    ],
+  },
+  {
     version: "1.7.4",
     date: "2026-08-24",
     headline:

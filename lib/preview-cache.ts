@@ -553,25 +553,110 @@ function normalizeName(value: string): string {
 }
 
 /**
+ * How both platforms bill a collaboration. Splitting on these is what tells a
+ * guest credit apart from a longer name that merely contains the one asked for:
+ * "Marshmello & Noah Cyrus" names Marshmello, "Hello Adele Tribute" does not
+ * name Adele. Alphabetic separators need whole-word boundaries, or "Charli XCX"
+ * splits on its own x.
+ */
+const CREDIT_SEPARATOR = /\s*(?:[&,/+;×·]|\b(?:feat|ft|featuring|with|vs|versus|and|x)\b\.?)\s*/i;
+
+/**
+ * The acts one credit string names, normalised.
+ *
+ * A leading "the" comes off because the two platforms disagree about it —
+ * iTunes bills "The Beatles" where Spotify says "Beatles" — and that disagreement
+ * used to be absorbed by the containment this replaces.
+ */
+function creditParts(value: string): string[] {
+  const parts = value
+    // Collapsed first, and not only for tidiness: CREDIT_SEPARATOR is `\s*…\s*`
+    // around a group that cannot match a space, so a run of n spaces makes the
+    // engine restart at every offset — O(n²). The routes clamp the input too;
+    // this makes the function safe on its own terms.
+    .replace(/\s+/g, " ")
+    .split(CREDIT_SEPARATOR)
+    .map((part) => normalizeName(part).replace(/^the /, ""))
+    .filter(Boolean);
+  return parts.length > 0 ? parts : [normalizeName(value)].filter(Boolean);
+}
+
+/**
  * Whether two credit strings name the same act.
  *
  * Loose in one direction on purpose: iTunes credits "Marshmello & Noah Cyrus"
- * where Spotify's first artist is just "Marshmello", so containment counts. On
- * whole-token boundaries only, or "Sia" would match "Sian Evans" — except for
- * CJK, which has no spaces to anchor on and falls back to a plain substring.
+ * where Spotify's first artist is just "Marshmello", so one credit naming every
+ * act the other does counts. It compares the acts rather than the raw strings,
+ * because plain containment also let "Hello Adele Tribute" pass as Adele — and
+ * a tribute band is exactly what a popularity-ranked search surfaces, titled
+ * exactly right, landing in the *strongest* tier. Confirmed live: that credit
+ * is the second result iTunes returns for "Hello Adele". CJK keeps the plain
+ * substring, having no spaces to anchor on.
  *
  * What it cannot do is see through translation: Spotify's 田馥甄 is iTunes'
  * "Hebe Tien", and no string comparison bridges that. That limit is the whole
  * reason this is only ever a *requirement* on title-only queries, never a
  * filter on the ones that already carried the artist upstream.
  */
-function artistMatches(candidate: string | undefined, wanted: string): boolean {
+function artistMatches(
+  candidate: string | undefined,
+  wanted: string,
+  /** The `wanted` side, already split. Invariant across a pick — see pickCandidate. */
+  askedCredits?: string[]
+): boolean {
   const a = normalizeName(candidate ?? "");
   const b = normalizeName(wanted);
   if (!a || !b) return false;
   if (a === b) return true;
   if (CJK.test(a) || CJK.test(b)) return a.includes(b) || b.includes(a);
-  return ` ${a} `.includes(` ${b} `) || ` ${b} `.includes(` ${a} `);
+  const credited = creditParts(candidate ?? "");
+  const asked = askedCredits ?? creditParts(wanted);
+  const names = (billing: string[], acts: string[]) => acts.every((act) => billing.includes(act));
+  return names(credited, asked) || names(asked, credited);
+}
+
+const FEAT_PARENTHETICAL = /[([]feat\.?[^)\]]*[)\]]/gi;
+
+/** Tags a platform appends to a title without changing which recording it is. */
+const QUALIFIER = "remaster(?:ed)?|live|version|edit|mix|mono|stereo|deluxe|explicit";
+
+/**
+ * Either a trailing " - Qualifier…", which is how Spotify writes it, or a
+ * bracketed group containing one, which is how iTunes does.
+ *
+ * Anchored far more tightly than it first appears to need, because the loose
+ * form was wrong in the one direction that mattered. `[-([]` followed by `.*?`
+ * reaching for the keyword truncates at the *first* hyphen in the title, so
+ * "Hip-Hop Is Dead (Remastered)" stripped to "Hip" — and with the loose tier
+ * sitting above the artist tier, that collapse outranked a candidate whose
+ * running time agreed to the millisecond. A new wrong-clip path, opened by the
+ * fix for wrong clips. The \b around the alternation is the same story one
+ * size down: without it "live" fires inside "Alive" and "mix" inside "Remix".
+ */
+const QUALIFIER_SUFFIX = new RegExp(
+  `\\s+[-–—]\\s+[^()\\[\\]]*\\b(?:${QUALIFIER})\\b.*$` +
+    `|\\s*[([][^)\\]]*\\b(?:${QUALIFIER})\\b[^)\\]]*[)\\]]`,
+  "gi"
+);
+
+/**
+ * The title with the qualifiers one platform adds and the other does not.
+ *
+ * Spotify stores "Karma Police - Remastered" where iTunes has "Karma Police
+ * (Remastered)" and, for the same recording, plain "Karma Police". An exact
+ * comparison drops all of those out of the tier that already knows the artist,
+ * which leaves the pick to the clock — and the clock cannot tell a remaster
+ * from the sibling album track next to it.
+ *
+ * Close to lib/mixed-playlist.ts's fingerprint() and deliberately not shared
+ * with it, in two ways that matter. It strips `explicit`, which that one does
+ * not; and it normalises through normalizeName's Unicode alphabet rather than
+ * fingerprint's `[^a-z0-9]`, because the ASCII form takes "小幸運" to the empty
+ * string — which would turn the tier below off for the exact catalogue it was
+ * added to protect. Syncing the two by hand is how that gets undone.
+ */
+function looseName(value: string): string {
+  return normalizeName(value.replace(FEAT_PARENTHETICAL, "").replace(QUALIFIER_SUFFIX, ""));
 }
 
 interface PickOptions {
@@ -630,34 +715,59 @@ function pickCandidate(
   // typographic apostrophe ("Don't" vs "Don’t") or a stray double space defeat
   // the strongest signal in the list, in a way the artist check is immune to.
   const wantedTitle = normalizeName(track);
-  const sameTitle = (c: Candidate) => normalizeName(c.trackName ?? "") === wantedTitle;
-  const sameArtist = (c: Candidate) => artistMatches(c.artistName, artist);
-  const drift = (c: Candidate) =>
-    durationMs && c.durationMs ? Math.abs(c.durationMs - durationMs) : Infinity;
+  const wantedLoose = looseName(track);
+  // Split once. It is the same string for every candidate, and this runs inside
+  // a filter that the tier loop may walk several times.
+  const askedCredits = creditParts(artist);
 
-  // Four tiers, not six. A finer "…and the running time agrees" tier above
-  // each of the first two would never change the outcome: its members all sit
-  // inside the tolerance while every other member of the tier below sits
-  // outside it, so the closest-drift tie-break already elects the same
-  // candidate. Spelling them out anyway would be code no test could reach.
-  const tiers: Array<(c: Candidate) => boolean> = [
-    (c) => sameArtist(c) && sameTitle(c),
-    sameArtist,
+  // Each candidate is judged once and carries its own verdicts from there. The
+  // tier loop below re-filters the list per tier, and the same three questions
+  // appear in more than one tier — asking upstream's strings again each time is
+  // regex work on the hottest path in the app, for an answer that cannot change.
+  // The empty guard on `looseOk` matters: a title made entirely of qualifiers
+  // strips to "", and without it every candidate that did would match all others.
+  const scored = playable.map((c) => ({
+    c,
+    artistOk: artistMatches(c.artistName, artist, askedCredits),
+    titleOk: normalizeName(c.trackName ?? "") === wantedTitle,
+    looseOk: wantedLoose.length > 0 && looseName(c.trackName ?? "") === wantedLoose,
+    drift: durationMs && c.durationMs ? Math.abs(c.durationMs - durationMs) : Infinity,
+  }));
+  type Scored = (typeof scored)[number];
+
+  // No "…and the running time agrees" tier above any of these: its members
+  // would all sit inside the tolerance while every other member of the tier
+  // below sat outside it, so the closest-drift tie-break already elects the
+  // same candidate. A *title* refinement is not redundant that way, because
+  // drift is what breaks the tie and drift knows nothing about titles.
+  const tiers: Array<(s: Scored) => boolean> = [
+    (s) => s.artistOk && s.titleOk,
+    // The right artist, and the right title once the qualifiers are off. Above
+    // the artist alone because otherwise a remaster-tagged title matches no
+    // tier at all and the clock chooses among an artist's own album tracks —
+    // which is how "Karma Police - Remastered" resolves to Lucky.
+    (s) => s.artistOk && s.looseOk,
+    (s) => s.artistOk,
     // Artist unverifiable — a translated credit. The clock is all that is left,
-    // and it is the tier that rescues CJK tracks from their own covers.
-    (c) => drift(c) <= DURATION_TOLERANCE_MS,
+    // and it is the tier that rescues CJK tracks from their own covers. It
+    // stays *above* the bare title on purpose: an exact title whose running
+    // time is 52s out is a cover, and the recording asked for is the one whose
+    // clock agrees. tests/preview.test.ts pins that ordering.
+    (s) => s.drift <= DURATION_TOLERANCE_MS,
     // Below here nothing ties the result to what was asked for, which is what
     // `requireVerified` refuses on a query that carried no artist upstream.
-    ...(options.requireVerified ? [] : [sameTitle, () => true]),
+    ...(options.requireVerified
+      ? []
+      : [(s: Scored) => s.titleOk, (s: Scored) => s.looseOk, () => true]),
   ];
 
   let match: Candidate | undefined;
   for (const inTier of tiers) {
-    const members = playable.filter(inTier);
+    const members = scored.filter(inTier);
     if (members.length === 0) continue;
     // `<` keeps the earlier candidate on a tie, so an all-unknown tier falls
     // back to the order upstream ranked them in.
-    match = members.reduce((best, c) => (drift(c) < drift(best) ? c : best));
+    match = members.reduce((best, s) => (s.drift < best.drift ? s : best)).c;
     break;
   }
 
@@ -859,9 +969,18 @@ async function askUpstream(query: QueryTarget): Promise<Resolution> {
   // the answer against. Without one it is also byte-identical to the query
   // above it, so the old flat list spent a second upstream call re-asking a
   // question it had just had answered.
+  // With no artist, the query above has already degraded to the bare title and
+  // the guarded follow-up is skipped as a duplicate — which quietly left the
+  // *unguarded* half as the only thing that ran, so a title-only search took
+  // upstream's best-ranked answer with nothing tying it to the request at all.
+  // The clock is the one check still available. Demand it when the caller sent
+  // one; when they did not, keep the old behaviour rather than manufacturing a
+  // week-long `absent` for a track that may well have a clip.
+  const titleOnly: SourceQuery = { q: track, requireVerified: Boolean(query.durationMs) };
+
   const viaItunes = await ask(
     "itunes",
-    [{ q: withArtist }, ...(artist ? [{ q: track, requireVerified: true }] : [])],
+    artist ? [{ q: withArtist }, { q: track, requireVerified: true }] : [titleOnly],
     ({ q, requireVerified }) => queryItunes(q, query, { requireVerified })
   );
   if (viaItunes) return viaItunes;
@@ -883,7 +1002,7 @@ async function askUpstream(query: QueryTarget): Promise<Resolution> {
           { q: withArtist },
           { q: track, requireVerified: true },
         ]
-      : [{ q: track }],
+      : [titleOnly],
     ({ q, requireVerified }) => queryDeezer(q, query, { requireVerified })
   );
   if (viaDeezer) return viaDeezer;

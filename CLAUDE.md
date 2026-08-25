@@ -42,7 +42,7 @@ There *is* server-side storage, but it is deliberately narrow: a KV layer (`lib/
 |---|---|
 | `POST /api/playlist` | `{url}` → playlist name + tracks, via Spotify **Client Credentials** flow (`lib/spotify.ts`). Rejects Spotify editorial playlists (IDs starting `37i9` return 404 for new apps). |
 | `GET /api/preview` | Track/artist/id → 30s preview URL (iTunes, then Deezer). No auth required. KV-cached by track id, including negative results. `&refresh=1` re-resolves a URL that stopped playing, on its own much tighter limit. |
-| `POST /api/preview/batch` | `{tracks:[{id,name,artist}]}` → the same lookup for a whole game in one request. |
+| `POST /api/preview/batch` | `{tracks:[{id,name,artist,durationMs?}]}` → the same lookup for a whole game in one request. `durationMs` is optional so an older client still resolves; without it the pick falls back to matching on names alone. |
 | `POST /api/room` | Creates a Mixed Playlist Mode room; returns room code, host token, expiry. |
 | `POST /api/room/[code]/submit` | A player submits their playlist URL to the room. |
 | `GET /api/room/[code]/status` | Poll for who has submitted so far. |
@@ -93,13 +93,23 @@ The same three layers, so they read the same way: cache → global budget (`PREV
 
 **The cooldown is memoized in module scope, and it must not go back to a KV read per track.** It is a site-wide, minute-scale signal that `askUpstream` consults once per source *per track*, so a cold 25-song game spent up to 50 reads learning the same two answers — more commands than the batch's own writes. A known-future `until` is trusted without re-reading at all; "not cooling" is held only `COOLDOWN_MEMO_MS`, because that is the answer that spends upstream calls, and the in-flight map is what makes the first wave of a batch share one read instead of each worker issuing its own. `startCooldown` primes the memo, so within an instance a 403 parks the source immediately; across instances a cooldown is joined up to `COOLDOWN_MEMO_MS` late, which is deliberately far below `MIN_COOLDOWN_SECONDS`.
 
-Four things here are easy to undo by accident:
+Seven things here are easy to undo by accident:
 
 - **The title-only queries verify the artist; the ones that carried it upstream must not.** Each source is asked progressively looser questions and the last drops the artist, so upstream ranks by popularity alone and returns the best-known song with that title — iTunes answers "Hello" with Pinkfong's nursery rhyme and "Alone" with Heart. Accepting one caches the wrong recording as `found` for a year, which refresh never re-picks, and the clip then contradicts the answer card. Those queries require the candidate to be tied to the request by *either* a matching credit or a matching running time, and otherwise hand over to the next source. Applying the same check to the artist-carrying queries looks like an obvious tightening and is a catalogue-wide outage for CJK: iTunes returns 小幸運 as "A Little Happiness" by "Hebe Tien" where Spotify says 田馥甄. `artistMatches` is only ever a veto where upstream had no artist signal of its own.
+
+  **A caller that sent no artist at all is the third case, and it used to fall through both.** With no artist the first query has already degraded to the bare title, so the guarded follow-up is byte-identical and is skipped as a duplicate — which left the *unguarded* half as the only thing that ran. `titleOnly` carries `requireVerified: Boolean(query.durationMs)`: demand the clock when the caller sent one, keep the old behaviour when they sent neither, because manufacturing a week-long `absent` for a track that may well have a clip is the worse failure.
+
+- **`artistMatches` compares the acts a credit names, never substrings.** Plain containment let "Hello Adele Tribute" read as Adele, and a tribute act titled exactly right is what a popularity-ranked search surfaces — confirmed live as the *second* iTunes result for "Hello Adele" — so it landed in the strongest tier and won on running time. `creditParts` splits on how both platforms bill a collaboration and one credit has to name every act the other does, which keeps "Marshmello & Noah Cyrus" matching Marshmello. Two boundaries in `CREDIT_SEPARATOR` are load-bearing: alphabetic separators need `\b` or "Charli XCX" splits on its own x, and a leading "the" comes off because iTunes bills "The Beatles" where Spotify says "Beatles". CJK keeps the plain substring, having no spaces to anchor on.
+
+- **`QUALIFIER_SUFFIX` is anchored far more tightly than it looks like it needs to be, and loosening it reopens the bug it fixed.** Spotify stores "Karma Police - Remastered 2011" where iTunes has plain "Karma Police", so a qualifier-stripped `looseName` tier sits between "same artist and title" and "same artist" — without it a remaster matches no tier and the clock picks among the artist's own album tracks. But `[-([]` followed by a lazy reach for the keyword truncates at the *first* hyphen, which stripped "Hip-Hop Is Dead (Remastered)" to "Hip" and outranked a candidate whose running time agreed to the millisecond: a new wrong-clip path opened by the fix for wrong clips. The `\b` around the alternation is the same story one size down — without it "live" fires inside "Alive" and "mix" inside "Remix". `looseName` is deliberately **not** shared with `lib/mixed-playlist.ts`'s `fingerprint()`: that one normalises through `[^a-z0-9]`, which takes 小幸運 to the empty string and would switch this tier off for the catalogue it was added to protect.
+
+  The tier order in `pickCandidate` is pinned by `tests/preview.test.ts` and is not arbitrary. The duration tier stays *above* the bare-title tiers: an exact title whose running time is 52s out is a cover, and the recording asked for is the one whose clock agrees. Each candidate is scored once and the tiers read the verdicts, because the tier loop re-filters per tier and re-parsing upstream's strings for an answer that cannot change is regex work on the hottest path in the app.
 
 - **`absent` and `unavailable` are not the same null, and collapsing them is a real bug that shipped.** `absent` is a fact about the recording — nothing has a clip — and is cached a week. `unavailable` is a fact about *us*: throttled, out of budget, or the request never got through. The old route mapped every failure onto `previewUrl: null` and cached it for seven days, so one throttled minute at peak marked a slice of the catalogue silent for a week, and it never reproduced locally because a laptop's own IP is never the one being throttled. Only a clean, complete reply from upstream may produce `absent`; everything else is `unavailable`, cached 90 seconds. A wrong `absent` lasts a week and is invisible, a wrong `unavailable` costs one retry. **The client half has the same rule** (`lib/preview-client.ts`, and `previewCache` in the game page stores settled answers only).
 - **iTunes signals throttling with `403`, not 429, and Deezer puts its quota error in the body of a `200`.** Reading only 429, or only the status, is how a refusal gets classified as "no result" in the first place.
 - **The cache key is deliberately unversioned**, unlike `lib/playlist-cache.ts`'s. The record is a strict superset of the `{previewUrl}` shape that shipped before it, so legacy entries still read as valid hits. Bumping a version would cold-start every entry in production simultaneously — precisely the upstream burst the module exists to prevent. For the same reason, legacy nulls are read as `absent` even though some are poisoned by the old bug: they age out within a week, and re-resolving all of them at once is the stampede that poisoned them.
+
+- **Both preview routes clamp `track`/`artist` through `clampPreviewField`, and they must agree or one key holds two answers.** The matching above is regex work on strings an unauthenticated caller hands over, and two of those regexes are super-linear on pathological input — a run of 16k spaces measured at 141ms in one credit split, once per candidate per tier. `PREVIEW_FIELD_MAX` (300, in `types/preview.ts`) bounds the input at the boundary rather than defending in every consumer, and Spotify's own fields sit far under it, so nothing real is truncated. **Clamp by code point, never `slice`**: UTF-16 units cut a surrogate pair in half, a lone high surrogate makes `encodeURIComponent` throw `URIError`, and that throw happens inside the batch's `Promise.all` — one emoji landing on the boundary costs all sixty tracks their previews and answers the bare 500 with no `code` that this project has been bitten by before.
 
 Positive entries are held a year, because a recording does not change. What does change is the URL — the clips sit on a CDN that rotates them — so the entry has to be *repairable* rather than merely expiring: the stored `itunesTrackId` lets `&refresh=1` re-resolve with one `lookup?id=` call instead of the five-call search fan-out, and the game page fires it from the `<audio>` element's `error` event, once per track. Drop the refresh path and the year-long TTL becomes a year of dead URLs.
 
@@ -222,6 +232,51 @@ cardinality-and-user-input rule the rest of that file keeps. The digest goes to
 `console.error` and onto the crash screen, where the person who can quote it
 already is.
 
+## A round's async work must not land on the next round
+
+`lib/round-token.ts` is the rule that stops one round's pending work from
+playing under the next round's card. A player reported "it was playing the wrong
+audio for my playlist" and this was half the cause; the other half is the
+picker, above.
+
+The game page holds **one** `<audio>` element and one set of phase state across
+every round, so anything that awaits mid-round — resolving a preview, repairing
+a rotted URL — can come back after the host has pressed Skip Track, Reveal
+Answer or Quit. `playClip` renders the "Skip Track" button *during* its own
+await, 1500ms in, which makes a host advancing while a preview resolves the
+ordinary case rather than a corner one.
+
+- **The rule lives in `lib/`, not in the component.** Same reason
+  `lib/room-poll.ts` and `lib/song-count.ts` do: the suite reaches `lib/` and
+  vitest cannot import a `.tsx` module here, so a rule left in
+  `app/game/page.tsx` is a rule with no test. It was written inline first, under
+  a comment conceding exactly that.
+- **`begin()` returns its own comparison, and that shape is the point.**
+  Capture-then-compare is a two-step rule whose steps can be forgotten
+  independently; handing the compare back from the capture means a caller that
+  remembered one has necessarily got the other. Call it *before* the await.
+- **`retireRound()` is the single round teardown, and a new round-ending path
+  must go through it.** It stops the clip, bumps the token, hands the `<audio>`
+  element's `src` back, and clears the loading affordances — four things whose
+  ordering nothing in the suite can reach, because the guard lives in a
+  component the tests cannot import. `nextTrack`, `endGame` and Quit all call
+  it; a fifth path that forgets the bump fails silently, which is the bug this
+  exists to prevent.
+- **A stale answer is dropped from the round but still cached.** `previewCache`
+  is keyed by track id, so a resolution that came back to the wrong round is
+  still worth keeping — the host who skipped past that track may come back to
+  it.
+- **The phase must be re-read after the await, not only before it.** Reveal
+  moves the phase without ending the round, so a guard read before the await
+  cannot speak for where the host is now: without the re-check the clip starts
+  under the answer card the host has just put up and tears the scoring buttons
+  off screen. `playClip` has exactly one caller — the waiting-phase Play button
+  — so a resolution landing in any other phase can never legitimately start a
+  clip.
+- **`releaseClip` uses `removeAttribute("src")`, not `src = ""`.** An empty
+  string resolves against the document and leaves the element holding the page's
+  own URL.
+
 ## The site notice warns before it refuses
 
 `components/service-notice.tsx` has two states and the earlier one is the
@@ -281,7 +336,7 @@ Every surface name is declared once in `lib/loop-links.ts` and derived from ther
 
 ## Types
 
-`types/index.ts` contains only the `Track` interface — the shape stored in sessionStorage and returned by `/api/playlist`. Shared game types (`GamePayload`, `GamePlayer`, `GameMode`) live in `lib/game-session.ts`; room types and constants (`ROOM_TTL_SECONDS`, `ROOM_MAX_SUBMISSIONS`) live in `types/room.ts`; preview wire types and `PREVIEW_BATCH_MAX` live in `types/preview.ts`, kept out of `lib/preview-cache.ts` so the browser bundle doesn't pull in `lib/kv.ts` and the Upstash client; the game page defines its own local `Phase` type.
+`types/index.ts` contains only the `Track` interface — the shape stored in sessionStorage and returned by `/api/playlist`. Shared game types (`GamePayload`, `GamePlayer`, `GameMode`) live in `lib/game-session.ts`; room types and constants (`ROOM_TTL_SECONDS`, `ROOM_MAX_SUBMISSIONS`) live in `types/room.ts`; preview wire types and the two input caps (`PREVIEW_BATCH_MAX`, `PREVIEW_FIELD_MAX` with its `clampPreviewField`) live in `types/preview.ts`, kept out of `lib/preview-cache.ts` so the browser bundle doesn't pull in `lib/kv.ts` and the Upstash client; the game page defines its own local `Phase` type.
 
 When adding a value to a union that `parseGamePayload` reads, extend that union's allow-list array alongside it (`GAME_MODES`, `PLAYLIST_SOURCES`). Both lines are guards rather than ternaries precisely so a forgotten entry is a value that reads back as the default instead of a member that silently changes behaviour.
 

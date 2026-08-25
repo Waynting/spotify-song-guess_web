@@ -18,7 +18,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getPreview } from "@/lib/preview-cache";
 import { enforceRateLimit } from "@/lib/rate-limit";
-import type { PreviewResult } from "@/types/preview";
+import { clampPreviewField, type PreviewResult } from "@/types/preview";
 
 /** Roughly one lookup per unique track; the client also caches per session. */
 const PREVIEW_LIMIT = 300;
@@ -38,8 +38,8 @@ export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   // Trimmed to match POST /api/preview/batch. Untrimmed, the same track through
   // the two routes can pick different recordings and write both under one key.
-  const track = (searchParams.get("track") ?? "").trim();
-  const artist = (searchParams.get("artist") ?? "").trim();
+  const track = clampPreviewField(searchParams.get("track") ?? "");
+  const artist = clampPreviewField(searchParams.get("artist") ?? "");
   const id = searchParams.get("id") ?? "";
   const refresh = searchParams.get("refresh") === "1";
   const duration = Number(searchParams.get("durationMs"));
