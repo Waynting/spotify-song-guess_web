@@ -3,7 +3,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { NextRequest } from "next/server";
 import { GET } from "@/app/api/preview/route";
 import { POST } from "@/app/api/preview/batch/route";
-import type { PreviewResult, PreviewStatus } from "@/types/preview";
+import {
+  clampPreviewField,
+  PREVIEW_FIELD_MAX,
+  type PreviewResult,
+  type PreviewStatus,
+} from "@/types/preview";
 
 /**
  * Two things every test here is really about.
@@ -436,6 +441,451 @@ describe("a wrong recording is never accepted for a right title", () => {
     expect(await resultOf(res)).toEqual({ previewUrl: null, status: "absent" });
     expect(probe.itunesTerms()).toEqual(["Song"]);
     expect(probe.deezerTerms()).toEqual(["Song"]);
+  });
+});
+
+/**
+ * The two ways a candidate got tied to the request by a string that did not
+ * actually name it, both measured against the live iTunes API.
+ */
+describe("a credit has to name the act, not merely contain it", () => {
+  it("does not count a tribute act as the artist it is imitating", async () => {
+    // "Hello Adele Tribute" is the second result the real API returns for
+    // "Hello Adele". Whole-token containment read it as Adele, which put a
+    // tribute recording in the *strongest* tier holding the exact title — and
+    // the closest-drift tie-break then handed it the round.
+    installTermMock({
+      itunes: {
+        "Hello Adele": itunesResults(
+          {
+            trackName: "Hello",
+            artistName: "Hello Adele Tribute",
+            previewUrl: "https://itunes.example/tribute.m4a",
+            trackTimeMillis: 295502,
+          },
+          {
+            trackName: "Hello",
+            artistName: "Adele",
+            previewUrl: "https://itunes.example/adele.m4a",
+            trackTimeMillis: 296000,
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({ track: "Hello", artist: "Adele", durationMs: "295502", id: "tribute-1" })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/adele.m4a");
+  });
+
+  it("still counts a comma-billed collaborator as the same artist", async () => {
+    // The guest credit the check has to keep letting through, in the separator
+    // that is easiest to lose when containment is replaced by act matching.
+    installTermMock({
+      itunes: {
+        "One Kiss Calvin Harris": itunesResult(
+          "One Kiss",
+          "Calvin Harris, Dua Lipa",
+          "https://itunes.example/onekiss.m4a"
+        ),
+      },
+    });
+
+    const res = await GET(request({ track: "One Kiss", artist: "Calvin Harris", id: "credit-1" }));
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/onekiss.m4a");
+  });
+
+  it("ignores a leading The, which the two platforms disagree about", async () => {
+    installTermMock({
+      itunes: {
+        "Come Together Beatles": itunesResult(
+          "Come Together",
+          "The Beatles",
+          "https://itunes.example/beatles.m4a"
+        ),
+      },
+    });
+
+    const res = await GET(request({ track: "Come Together", artist: "Beatles", id: "credit-2" }));
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/beatles.m4a");
+  });
+
+  it("does not split an artist name on a separator letter of its own", async () => {
+    // The word boundaries on the alphabetic separators, which are the whole
+    // reason "x" is safe to treat as one. Drop them and "Charli XCX" becomes
+    // ["charli", "c"], which a tribute credit is then a superset of — the exact
+    // false positive this describe block exists to close, reintroduced.
+    installTermMock({
+      itunes: {
+        "Boom Clap Charli XCX": itunesResults(
+          {
+            trackName: "Boom Clap",
+            artistName: "Charli XCX Tribute",
+            previewUrl: "https://itunes.example/trib.m4a",
+            trackTimeMillis: 169000,
+          },
+          {
+            trackName: "Boom Clap",
+            artistName: "Charli XCX",
+            previewUrl: "https://itunes.example/real.m4a",
+            trackTimeMillis: 170000,
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({ track: "Boom Clap", artist: "Charli XCX", durationMs: "169000", id: "sep-x" })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/real.m4a");
+  });
+
+  it("counts a feat.-billed credit as the same artist", async () => {
+    // Both candidates carry the title, so the credit is what decides rather
+    // than the bare-title tier underneath it.
+    installTermMock({
+      itunes: {
+        "Work Rihanna": itunesResults(
+          {
+            trackName: "Work",
+            artistName: "Work Song Karaoke",
+            previewUrl: "https://itunes.example/karaoke.m4a",
+          },
+          {
+            trackName: "Work",
+            artistName: "Rihanna feat. Drake",
+            previewUrl: "https://itunes.example/work.m4a",
+          }
+        ),
+      },
+    });
+
+    const res = await GET(request({ track: "Work", artist: "Rihanna", id: "sep-feat" }));
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/work.m4a");
+  });
+
+  it("does not let a credit made only of separators match every artist", async () => {
+    // Artists named "X" exist. It splits to nothing, and `[].every(...)` is
+    // true — so without creditParts' fallback this candidate is billed as
+    // whoever you asked for, and its better running time wins the top tier.
+    installTermMock({
+      itunes: {
+        "Hello Adele": itunesResults(
+          {
+            trackName: "Hello",
+            artistName: "X",
+            previewUrl: "https://itunes.example/x.m4a",
+            trackTimeMillis: 295502,
+          },
+          {
+            trackName: "Hello",
+            artistName: "Adele",
+            previewUrl: "https://itunes.example/adele.m4a",
+            trackTimeMillis: 296502,
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({ track: "Hello", artist: "Adele", durationMs: "295502", id: "sep-empty" })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/adele.m4a");
+  });
+});
+
+describe("a qualifier one platform adds is not a different recording", () => {
+  it("keeps a remaster with its own song instead of leaving it to the clock", async () => {
+    // Spotify stores the remaster tag; iTunes returns the same recording under
+    // the plain title. The exact comparison then matched nothing, the pick fell
+    // through to the artist tier, and running time alone cannot tell a remaster
+    // from the album track sitting next to it.
+    installTermMock({
+      itunes: {
+        "Karma Police - Remastered 2011 Radiohead": itunesResults(
+          {
+            trackName: "Lucky",
+            artistName: "Radiohead",
+            previewUrl: "https://itunes.example/lucky.m4a",
+            trackTimeMillis: 262500, // 500ms out — inside the window
+          },
+          {
+            trackName: "Karma Police",
+            artistName: "Radiohead",
+            previewUrl: "https://itunes.example/karma.m4a",
+            trackTimeMillis: 261000, // 2s out — further away, and the right song
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({
+        track: "Karma Police - Remastered 2011",
+        artist: "Radiohead",
+        durationMs: "263000",
+        id: "loose-1",
+      })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/karma.m4a");
+  });
+
+  it("strips a feat. parenthetical the other platform leaves off", async () => {
+    // The higher-traffic of looseName's two passes: Spotify stores the credit
+    // in the title where iTunes returns the plain one. The right answer carries
+    // the *worse* running time, so the loose title is what elects it.
+    installTermMock({
+      itunes: {
+        "Sunflower (feat. Swae Lee) Post Malone": itunesResults(
+          {
+            trackName: "Circles",
+            artistName: "Post Malone",
+            previewUrl: "https://itunes.example/circles.m4a",
+            trackTimeMillis: 158100,
+          },
+          {
+            trackName: "Sunflower",
+            artistName: "Post Malone",
+            previewUrl: "https://itunes.example/sunflower.m4a",
+            trackTimeMillis: 155000,
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({
+        track: "Sunflower (feat. Swae Lee)",
+        artist: "Post Malone",
+        durationMs: "158000",
+        id: "loose-feat",
+      })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/sunflower.m4a");
+  });
+
+  it("strips only at a qualifier, never at the first hyphen in the title", async () => {
+    // "Hip-Hop Is Dead (Remastered)" once stripped to "Hip", which then matched
+    // any other Hip-something by the same artist — and because the loose tier
+    // outranks the artist tier, that beat the candidate whose running time
+    // agreed exactly. A wrong clip introduced by the fix for wrong clips.
+    installTermMock({
+      itunes: {
+        "Hip-Hop Is Dead - Remastered Nas": itunesResults(
+          {
+            trackName: "Hip-Hop (Live)",
+            artistName: "Nas",
+            previewUrl: "https://itunes.example/hiphop-live.m4a",
+            trackTimeMillis: 190000,
+          },
+          {
+            trackName: "Hip-Hop Is Dead",
+            artistName: "Nas",
+            previewUrl: "https://itunes.example/hiphop-is-dead.m4a",
+            trackTimeMillis: 240000,
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({
+        track: "Hip-Hop Is Dead - Remastered",
+        artist: "Nas",
+        durationMs: "240000",
+        id: "loose-hyphen",
+      })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/hiphop-is-dead.m4a");
+  });
+
+  it("does not match two titles that both strip to nothing", async () => {
+    // looseName("(Live)") is "", and so is looseName("(Remastered)"). Without
+    // the empty guard the remaster joins the loose tier and wins outright, a
+    // hundred seconds of drift notwithstanding.
+    installTermMock({
+      itunes: {
+        "(Live) Foo": itunesResults(
+          {
+            trackName: "(Remastered)",
+            artistName: "Foo",
+            previewUrl: "https://itunes.example/rem.m4a",
+            trackTimeMillis: 100000,
+          },
+          {
+            trackName: "Something Else",
+            artistName: "Foo",
+            previewUrl: "https://itunes.example/else.m4a",
+            trackTimeMillis: 199900,
+          }
+        ),
+      },
+    });
+
+    const res = await GET(
+      request({ track: "(Live)", artist: "Foo", durationMs: "200000", id: "loose-empty" })
+    );
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/else.m4a");
+  });
+});
+
+describe("an artist-less lookup still answers to something", () => {
+  it("holds it to the clock, which is the only check it has left", async () => {
+    // Nothing carried an artist upstream and nothing can check the answer
+    // against one, so this query used to take whatever upstream ranked first —
+    // and cache it as `found` for a year.
+    installTermMock({
+      itunes: {
+        Hello: itunesResults({
+          trackName: "Hello",
+          artistName: "Pinkfong",
+          previewUrl: "https://itunes.example/pinkfong.m4a",
+          trackTimeMillis: 96000,
+        }),
+      },
+    });
+
+    const res = await GET(request({ track: "Hello", durationMs: "295502", id: "noartist-1" }));
+
+    expect(await resultOf(res)).toEqual({ previewUrl: null, status: "absent" });
+  });
+
+  it("resolves when the running time does agree", async () => {
+    installTermMock({
+      itunes: {
+        Hello: itunesResults({
+          trackName: "Hello",
+          artistName: "Adele",
+          previewUrl: "https://itunes.example/adele.m4a",
+          trackTimeMillis: 295502,
+        }),
+      },
+    });
+
+    const res = await GET(request({ track: "Hello", durationMs: "295502", id: "noartist-2" }));
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/adele.m4a");
+  });
+
+  it("still answers when no running time was sent either", async () => {
+    // Nothing to verify against in either direction. Refusing here would
+    // manufacture a week-long `absent` for a track that may well have a clip,
+    // which is the more expensive of the two mistakes and the harder to see.
+    installTermMock({
+      itunes: { Hello: itunesResult("Hello", "Pinkfong", "https://itunes.example/pinkfong.m4a") },
+    });
+
+    const res = await GET(request({ track: "Hello", id: "noartist-3" }));
+
+    expect(await previewUrlFrom(res)).toBe("https://itunes.example/pinkfong.m4a");
+  });
+
+  it("holds a Deezer answer to the clock too, not just an iTunes one", async () => {
+    // Deezer is the last source before the answer settles as `absent` for a
+    // week, and its arm of the artist-less query is a separate line of code.
+    installTermMock({
+      deezer: {
+        Hello: {
+          data: [
+            {
+              preview: "https://deezer.example/pinkfong.mp3",
+              id: 1,
+              title: "Hello",
+              artist: { name: "Pinkfong" },
+              duration: 96,
+            },
+          ],
+        },
+      },
+    });
+
+    const res = await GET(request({ track: "Hello", durationMs: "295502", id: "dz-noartist-1" }));
+
+    expect(await resultOf(res)).toEqual({ previewUrl: null, status: "absent" });
+  });
+
+  it("accepts a Deezer answer whose whole-second clock agrees", async () => {
+    // Deezer reports seconds, so 295 against 295502ms is 502ms of quantisation
+    // drift. Inside the tolerance, and it must not read as a mismatch.
+    installTermMock({
+      deezer: {
+        Hello: {
+          data: [
+            {
+              preview: "https://deezer.example/adele.mp3",
+              id: 2,
+              title: "Hello",
+              artist: { name: "Adele" },
+              duration: 295,
+            },
+          ],
+        },
+      },
+    });
+
+    const res = await GET(request({ track: "Hello", durationMs: "295502", id: "dz-noartist-2" }));
+
+    expect(await previewUrlFrom(res)).toBe("https://deezer.example/adele.mp3");
+  });
+});
+
+/**
+ * lib/preview-cache.ts matches on these strings with regexes that are
+ * super-linear on pathological input, and both routes take them straight off
+ * the wire from an unauthenticated caller. enforceRateLimit fails open by
+ * design, so it is not a second line of defence here.
+ */
+describe("a field the caller controls is clamped before it reaches a regex", () => {
+  const pathological = "a" + " ".repeat(16000) + "b";
+
+  it("caps a field at PREVIEW_FIELD_MAX", () => {
+    expect(clampPreviewField("  " + "a".repeat(5000) + "  ")).toHaveLength(PREVIEW_FIELD_MAX);
+  });
+
+  it("clamps what the GET route sends upstream", async () => {
+    const probe = installTermMock({});
+
+    await GET(request({ track: pathological, artist: "Artist", id: "clamp-1" }));
+
+    expect(probe.itunesTerms().length).toBeGreaterThan(0);
+    for (const term of probe.itunesTerms()) {
+      expect(term.length).toBeLessThanOrEqual(PREVIEW_FIELD_MAX * 2 + 1);
+    }
+  });
+
+  it("does not cut a surrogate pair in half", async () => {
+    // A lone high surrogate makes encodeURIComponent throw, and the throw is
+    // inside the batch's Promise.all — one emoji on the boundary took all sixty
+    // tracks down with it, as a bare 500.
+    installTermMock({});
+
+    const res = await POST(
+      batchRequest([{ id: "clamp-3", name: "a".repeat(PREVIEW_FIELD_MAX - 1) + "😀", artist: "A" }])
+    );
+
+    expect(res.status).toBe(200);
+  });
+
+  it("clamps the batch route the same way, or one key holds two answers", async () => {
+    const probe = installTermMock({});
+
+    await POST(batchRequest([{ id: "clamp-2", name: pathological, artist: "Artist" }]));
+
+    expect(probe.itunesTerms().length).toBeGreaterThan(0);
+    for (const term of probe.itunesTerms()) {
+      expect(term.length).toBeLessThanOrEqual(PREVIEW_FIELD_MAX * 2 + 1);
+    }
   });
 });
 
