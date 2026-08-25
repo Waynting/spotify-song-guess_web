@@ -271,13 +271,27 @@ outlive a full game. Buzzer rooms are a different system with a sliding timeout.
 
 ### "A clip plays but the answer card disagrees"
 
-A wrong recording was cached as correct. Positive preview entries are held a
-**year**, and `&refresh=1` repairs rotted URLs, not wrong songs. The matching
-rules are in `lib/preview-cache.ts` — see the 1.2.0 changelog entry for why the
-tier list is ordered the way it is. Fixing one means invalidating that track's
-key, not bumping the cache version: a version bump cold-starts every entry in
-production simultaneously, which is the upstream stampede the module exists to
-prevent.
+Two causes, and they are told apart by whether it is reproducible. Ask the host
+whether they skipped or revealed while it said "Finding audio…".
+
+**If it only happened once, on a round they advanced past:** the preview
+resolved after the host had moved on and landed on the round in front of it.
+`lib/round-token.ts` stamps a generation before every await and
+`retireRound()` bumps it, so this is fixed as of 1.7.5 — but a round-ending
+path added later that forgets to call `retireRound()` brings it straight back,
+and nothing in the suite can catch that (the guard lives in
+`app/game/page.tsx`, which vitest cannot import). Check the call sites first.
+
+**If the same track is wrong every time:** a wrong recording was cached as
+correct. Positive preview entries are held a **year**, and `&refresh=1` repairs
+rotted URLs, not wrong songs — worse, a wrong-but-playable URL never fires the
+`<audio>` error that triggers refresh at all. The matching rules are in
+`lib/preview-cache.ts`; the 1.2.0 changelog entry has the original tier
+reasoning and 1.7.5 has the three corrections layered on it (credits compared as
+acts, a qualifier-stripped title tier, artist-less lookups held to the running
+time). Fixing one means invalidating that track's key, not bumping the cache
+version: a version bump cold-starts every entry in production simultaneously,
+which is the upstream stampede the module exists to prevent.
 
 ---
 

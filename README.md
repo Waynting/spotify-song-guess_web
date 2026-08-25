@@ -4,7 +4,7 @@ A local party music guessing game powered by Spotify playlists. Live at **[guess
 
 No login, no accounts. The host pastes a public Spotify playlist URL, everyone guesses out loud, and the host awards points.
 
-Current version: **1.1.0** — see [CHANGELOG.md](./CHANGELOG.md).
+Current version: **1.7.5** — see [CHANGELOG.md](./CHANGELOG.md).
 
 ## How It Works
 
@@ -184,7 +184,7 @@ components/                  Buzzer button + host panel, room panel, mixed colle
                              crash screen, ui/ (shadcn primitives)
 lib/                         All shared logic — see "Architecture" below
 worker/                      Cloudflare Worker + BuzzerRoom Durable Object
-tests/                       31 Vitest files, 567 cases
+tests/                       32 Vitest files, 591 cases
 types/                       Track, room, preview, and service-status wire types
 ```
 
@@ -195,8 +195,8 @@ Every route is IP rate limited (`lib/rate-limit.ts`) with a fixed window; limits
 | Route | Method | Purpose | Limit |
 |---|---|---|---|
 | `/api/playlist` | POST | `{url}` → playlist name + tracks, via Spotify Client Credentials. Editorial playlists (IDs starting `37i9`) are rejected — they 404 for new apps. | 30 / 10 min |
-| `/api/preview` | GET | `?track=&artist=&id=` → `{previewUrl, status}` where status is `found` / `absent` / `unavailable`. `&refresh=1` re-resolves a URL that stopped playing. | 300 / 10 min (refresh: 30) |
-| `/api/preview/batch` | POST | `{tracks:[{id,name,artist}]}` (max 60) → previews for a whole game in one request. | 20 / 10 min |
+| `/api/preview` | GET | `?track=&artist=&id=` → `{previewUrl, status}` where status is `found` / `absent` / `unavailable`. `&refresh=1` re-resolves a URL that stopped playing. `track` and `artist` are trimmed and clamped to 300 code points. | 300 / 10 min (refresh: 30) |
+| `/api/preview/batch` | POST | `{tracks:[{id,name,artist,durationMs?}]}` (max 60) → previews for a whole game in one request. Same 300-code-point clamp on `name` and `artist`. | 20 / 10 min |
 | `/api/room` | POST | Optional `{code}` → `{roomCode, hostToken, expiresAt}`. Creates the Mixed Playlist mailbox. | 10 / 10 min |
 | `/api/room/[code]/submit` | POST | `{playerName, playlistUrl}` → `{ok, trackCount}`. | 20 / 10 min |
 | `/api/room/[code]/status` | GET | Who has submitted so far (host polls every 4s). | 200 / 10 min |
@@ -214,6 +214,10 @@ Every route is IP rate limited (`lib/rate-limit.ts`) with a fixed window; limits
 Spotify deprecated `preview_url` in Nov 2024 and now returns `null` for **every** track on Client Credentials — measured 0/20 across four markets — so `Track` carries no `previewUrl` field at all and every clip the game plays is resolved by this app. On mount the game page prefetches the whole game with one `POST /api/preview/batch`; anything unresolved falls back to `GET /api/preview` lazily when the host presses Play. Both search the iTunes Search API first, then Deezer, and neither needs credentials.
 
 Choosing *which* result to play takes two signals, because neither survives every case on its own. Credits are routinely translated — iTunes returns 盧廣仲 as "Crowd Lu", 小幸運 as "A Little Happiness" — while a cover shares the original's title by definition, so on a CJK track the only string that lines up often belongs to the wrong recording. Running time is translated by nobody and agrees with Spotify to within a millisecond or two, which is exactly what a re-recording does not do. So the two check each other, and the loosest queries — the title-only ones, where upstream was handed no artist to rank by and answers "Hello" with Pinkfong's nursery rhyme rather than Adele's — are only accepted when one of them verifies. Everything else is handed to the next source.
+
+Three details of that matching are load-bearing, and each one was a wrong clip before it existed. Credits are compared as the *acts they name* (split on `&`, `,`, `feat`, `with`, `x`, …) rather than as substrings, so "Marshmello & Noah Cyrus" still matches Marshmello but "Hello Adele Tribute" no longer passes as Adele — a tribute act carrying the exact title is the second result the live iTunes API returns for that search. Titles are compared again with the qualifiers one platform adds and the other does not stripped off ("Karma Police - Remastered 2011" against plain "Karma Police"), because otherwise a remaster matches no tier at all and the pick falls to a clock that cannot tell it from the album track beside it. And a lookup that carried no artist upstream is held to the running time when the caller sent one, rather than taking whatever upstream ranked first.
+
+The other way the clip and the card can disagree is timing, and it has nothing to do with matching. Resolving a preview takes long enough that the game page renders a **Skip Track** button *during* the wait, so a host who skips or reveals while one is in flight is the ordinary case. `lib/round-token.ts` stamps a generation before every await; anything that comes back to a round that has moved on is dropped rather than played, though its answer is still cached under the track id for whenever the host reaches it.
 
 Preview results are three-way, not two-way: `found`, `absent` (nothing has a clip — cached a week), and `unavailable` (we were throttled or the request never got through — cached 90 seconds). Collapsing those two nulls is a real bug that shipped once: one throttled minute marked a slice of the catalogue silent for a week.
 
@@ -262,7 +266,7 @@ Two hand-written changelogs, and a release updates both: [`CHANGELOG.md`](./CHAN
 ## Testing
 
 ```bash
-npm test              # 31 files, 567 cases — vitest, jsdom
+npm test              # 32 files, 591 cases — vitest, jsdom
 cd worker && npm test # Durable Object tests inside workerd
 ```
 
