@@ -19,6 +19,7 @@ import { errorResponse } from "@/lib/api-error";
 import { getPreviews, type PreviewQuery } from "@/lib/preview-cache";
 import { enforceRateLimit } from "@/lib/rate-limit";
 import {
+  clampPreviewField,
   PREVIEW_BATCH_MAX,
   type PreviewBatchResponse,
   type PreviewResult,
@@ -48,7 +49,7 @@ function parseTracks(body: unknown): PreviewQuery[] | null {
   const queries: PreviewQuery[] = [];
   for (const raw of tracks as BatchRequestTrack[]) {
     const id = typeof raw?.id === "string" ? raw.id.trim() : "";
-    const name = typeof raw?.name === "string" ? raw.name.trim() : "";
+    const name = typeof raw?.name === "string" ? clampPreviewField(raw.name) : "";
     // An id is required here, unlike on the GET: the response is a map keyed by
     // it, so an entry without one has nowhere to be returned to.
     if (!id || !name) return null;
@@ -58,7 +59,7 @@ function parseTracks(body: unknown): PreviewQuery[] | null {
     queries.push({
       id,
       track: name,
-      artist: typeof raw?.artist === "string" ? raw.artist.trim() : "",
+      artist: typeof raw?.artist === "string" ? clampPreviewField(raw.artist) : "",
       ...(Number.isFinite(duration) && duration > 0 ? { durationMs: duration } : {}),
     });
   }

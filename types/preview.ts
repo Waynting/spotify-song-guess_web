@@ -58,3 +58,30 @@ export interface PreviewBatchResponse {
  * knows will be refused.
  */
 export const PREVIEW_BATCH_MAX = 60;
+
+/**
+ * Ceiling on one `track` or `artist` string.
+ *
+ * Spotify's own fields sit far under this, so nothing real is truncated. It is
+ * here because lib/preview-cache.ts matches on these strings with regexes that
+ * are super-linear on pathological input — a run of spaces costs the credit
+ * splitter O(n²), measured at 141ms for 16k of them — and both preview routes
+ * take them straight off the wire. Bounding the input is the cheap half; the
+ * regexes are the expensive half to reason about, and the string is the part
+ * a caller controls. Same idea as PREVIEW_BATCH_MAX one line up: a cap at the
+ * boundary rather than a defence in every consumer.
+ */
+export const PREVIEW_FIELD_MAX = 300;
+
+/**
+ * Trim, then clamp. Both routes must agree, or one key holds two answers.
+ *
+ * By code point, not by `slice`. UTF-16 units cut a surrogate pair in half, and
+ * a lone high surrogate makes `encodeURIComponent` throw `URIError` — which in
+ * lib/preview-cache.ts happens inside the batch's `Promise.all`, so one emoji
+ * landing on the boundary cost all sixty tracks their previews and answered the
+ * bare 500 with no `code` that this project has been bitten by before.
+ */
+export function clampPreviewField(value: string): string {
+  return Array.from(value.trim()).slice(0, PREVIEW_FIELD_MAX).join("");
+}
