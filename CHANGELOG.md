@@ -20,10 +20,12 @@ because the clip was never the right recording in the first place.
   `fetchPreview`, and then assigned `audio.src` and flipped the phase with no
   re-check — and the "Skip Track" button is rendered *by that very await*, 1500ms
   in. So a host who got bored of "Finding audio…" and skipped got round N's clip
-  under round N+1's card, which is the report almost exactly. A `roundTokenRef`
-  generation counter is captured before every await and compared after it;
-  anything that no longer matches is dropped, though its answer is still cached
-  because that is keyed by track id. `handleAudioError`'s repair path had the
+  under round N+1's card, which is the report almost exactly. The generation
+  counter behind the fix is `lib/round-token.ts` — in `lib/` because the suite
+  reaches there and cannot import a `.tsx` module, and shaped so `begin()` hands
+  back its own comparison rather than leaving a caller to write the second half
+  of a two-step rule. Anything that comes back to a round that has moved on is
+  dropped, though its answer is still cached, because that is keyed by track id. `handleAudioError`'s repair path had the
   same hole — its phase guard was read *before* the await.
 
   The round does not have to end for this to bite: "Reveal Answer" is rendered
