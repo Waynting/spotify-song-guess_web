@@ -15,6 +15,7 @@ import {
 } from "@/lib/game-session";
 import { loadGame } from "@/lib/game-storage";
 import { fetchPreview, fetchPreviewBatch } from "@/lib/preview-client";
+import { createRoundToken } from "@/lib/round-token";
 import { isPreviewSettled, type PreviewBatchTrack } from "@/types/preview";
 import { BuzzerHostPanel, type BuzzerControls } from "@/components/buzzer-host-panel";
 import { LoopQr } from "@/components/loop-qr";
@@ -153,7 +154,15 @@ export default function GamePage() {
   // Read by the buzz handler, which must not re-subscribe on every phase change.
   const phaseRef = useRef<Phase>("waiting");
   phaseRef.current = phase;
-  const loadingSkipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * Which round the host is looking at. See lib/round-token.ts for the rule and
+   * for why it is not written inline here.
+   *
+   * playClip renders the "Skip Track" button *during* its own await, 1500ms in,
+   * so a host advancing while a preview resolves is the ordinary case rather
+   * than a corner one.
+   */
+  const roundsRef = useRef(createRoundToken());
   /**
    * Only ever holds *settled* answers — a found URL, or a confirmed null for a
    * song nothing has a clip for. An "unavailable" is never written here: it
@@ -278,6 +287,45 @@ export default function GamePage() {
   }, []);
 
   /**
+   * Hand back the clip the element is holding, so a round cannot inherit the
+   * previous round's URL. `handleAudioError` already documented this as
+   * something that happens between rounds; until now nothing did it, and the
+   * only reason a stale src was never heard is that the replay controls happen
+   * not to render outside "playing"/"guessing" — one render condition away from
+   * being audible. Round teardown only: reveal() also stops the clip, and replay
+   * has to keep working after it.
+   *
+   * removeAttribute rather than `src = ""`, which resolves against the document
+   * and would leave the element holding the page's own URL.
+   */
+  const releaseClip = useCallback(() => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    audio.removeAttribute("src");
+    audio.load();
+  }, []);
+
+  /**
+   * End the round the host is looking at: stop the clip, retire everything
+   * still in flight for it, hand the element back, and clear the affordances
+   * that belong to a round being loaded.
+   *
+   * One function rather than three lines at each call site, because the failure
+   * mode of forgetting the token bump is precisely the bug this exists to fix,
+   * and a fourth round-ending path is exactly the kind of thing that gets added
+   * later. Nothing can test that ordering — the guard lives in a component the
+   * vitest suite cannot reach — so it has to be impossible to get wrong instead.
+   */
+  const retireRound = useCallback(() => {
+    stopClip();
+    roundsRef.current.bump();
+    releaseClip();
+    setPreviewLoading(false);
+    setNoAudio(false);
+    setLoadingSkipVisible(false);
+  }, [stopClip, releaseClip]);
+
+  /**
    * Start (or restart) the progress bar and the end-of-clip deadline for
    * however much of the clip is left. Called once when a clip starts, and again
    * on every resume.
@@ -362,6 +410,7 @@ export default function GamePage() {
     const audio = audioRef.current;
     const track = tracks[currentIndex];
     if (!audio || !track) return;
+    const stillThisRound = roundsRef.current.begin();
 
     // Whatever the prefetch resolved. There is no Spotify URL to prefer here:
     // preview_url has been null for every track since Nov 2024, so the clip
@@ -376,7 +425,11 @@ export default function GamePage() {
     if (!previewUrl && cached === undefined) {
       setPreviewLoading(true);
       setLoadingSkipVisible(false);
-      loadingSkipTimerRef.current = setTimeout(() => setLoadingSkipVisible(true), 1500);
+      // Held in a local rather than a ref on purpose. Two rounds' resolutions
+      // can be in flight at once, and a shared ref would already belong to the
+      // round that replaced us — clearing it would take the next host's Skip
+      // button away instead of our own.
+      const skipTimer = setTimeout(() => setLoadingSkipVisible(true), 1500);
 
       const result = await fetchPreview({
         id: track.id,
@@ -384,14 +437,33 @@ export default function GamePage() {
         artist: track.artists[0] ?? "",
         durationMs: track.durationMs,
       });
-      previewUrl = result.previewUrl;
-      missReason = result.status === "unavailable" ? "unavailable" : "absent";
+      clearTimeout(skipTimer);
+      // Keyed by track id, so it is worth keeping whichever round we came back
+      // to — the host who skipped past this track may still come back to it.
       // Settled answers only — see previewCache's declaration.
       if (isPreviewSettled(result.status)) previewCache.current[track.id] = result.previewUrl;
 
-      if (loadingSkipTimerRef.current) clearTimeout(loadingSkipTimerRef.current);
+      // The host moved on while we were asking. Everything past here writes to
+      // state and to an element that now belong to somebody else's round.
+      if (!stillThisRound()) return;
+
+      // Past the token check this is still our round, so the loading
+      // affordances are ours to put away — including on the reveal path just
+      // below, which returns without ever starting a clip. Doing it any earlier
+      // would let an abandoned round switch off a *new* round's spinner.
       setLoadingSkipVisible(false);
       setPreviewLoading(false);
+
+      // The round does not have to *end* for the answer to be stale. "Reveal
+      // Answer" is rendered by this very loading state, and reveal() only moves
+      // the phase — so without this the clip started under the answer card the
+      // host had just put up, tearing the scoring buttons off screen. playClip
+      // has exactly one caller, the waiting-phase Play button, so a resolution
+      // landing in any other phase can never legitimately start a clip.
+      if (phaseRef.current !== "waiting") return;
+
+      previewUrl = result.previewUrl;
+      missReason = result.status === "unavailable" ? "unavailable" : "absent";
     }
 
     if (!previewUrl) {
@@ -435,11 +507,29 @@ export default function GamePage() {
     if (phaseRef.current !== "playing" && phaseRef.current !== "guessing") return;
     if (refreshedTracks.current.has(track.id)) return;
     refreshedTracks.current.add(track.id);
+    const stillThisRound = roundsRef.current.begin();
 
     const result = await fetchPreview(
       { id: track.id, name: track.name, artist: track.artists[0] ?? "", durationMs: track.durationMs },
       { refresh: true }
     );
+
+    // Same rule as playClip, and the reason the phase guard above is not enough:
+    // it was read before the await. A repair that lands after the host has moved
+    // on would put the previous round's clip on this round's card.
+    if (!stillThisRound()) {
+      if (result.previewUrl) previewCache.current[track.id] = result.previewUrl;
+      return;
+    }
+    // The guard above the await is read before it, so it cannot speak for where
+    // the host is now. Reveal moves the phase without ending the round, and a
+    // repair can land up to UPSTREAM_TIMEOUT_MS later: without this it either
+    // starts the clip under the answer card, or — on the failure branch — puts
+    // the phase back to "waiting" and takes the whole scoring card with it.
+    if (phaseRef.current !== "playing" && phaseRef.current !== "guessing") {
+      if (result.previewUrl) previewCache.current[track.id] = result.previewUrl;
+      return;
+    }
 
     if (!result.previewUrl) {
       // Nothing left to try. Put the round into the state a track with no clip
@@ -540,7 +630,7 @@ export default function GamePage() {
   }
 
   function nextTrack() {
-    stopClip();
+    retireRound();
     buzzerControlsRef.current?.next();
     trackEvent("round_completed", {
       round_index: currentIndex + 1,
@@ -576,14 +666,11 @@ export default function GamePage() {
       setAlbumPointsAwarded(false);
       setSourcePointsAwarded(false);
       setAlbumHintShown(false);
-      setPreviewLoading(false);
-      setNoAudio(false);
-      setLoadingSkipVisible(false);
     }
   }
 
   function endGame() {
-    stopClip();
+    retireRound();
     trackGameFinished();
     setPhase("finished");
   }
@@ -1443,7 +1530,7 @@ export default function GamePage() {
               </button>
             )}
             <button
-              onClick={() => { stopClip(); router.push("/"); }}
+              onClick={() => { retireRound(); router.push("/"); }}
               style={{
                 background: "none",
                 border: "1px solid #2a2a2a",
