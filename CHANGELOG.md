@@ -5,6 +5,98 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.5] - 2026-08-25
+
+A player wrote in: *"it was playing the wrong audio for my playlist."*
+
+Two independent causes, and neither is the one the report sounds like. The
+clip and the answer card can disagree because the clip arrived late, or
+because the clip was never the right recording in the first place.
+
+### Fixed
+
+- **A preview that resolves after the host has moved on no longer plays**
+  (`app/game/page.tsx`). `playClip` captured `tracks[currentIndex]`, awaited
+  `fetchPreview`, and then assigned `audio.src` and flipped the phase with no
+  re-check — and the "Skip Track" button is rendered *by that very await*, 1500ms
+  in. So a host who got bored of "Finding audio…" and skipped got round N's clip
+  under round N+1's card, which is the report almost exactly. A `roundTokenRef`
+  generation counter is captured before every await and compared after it;
+  anything that no longer matches is dropped, though its answer is still cached
+  because that is keyed by track id. `handleAudioError`'s repair path had the
+  same hole — its phase guard was read *before* the await.
+
+  The round does not have to end for this to bite: "Reveal Answer" is rendered
+  by the same loading state and only moves the phase, so the clip could start
+  underneath an answer card the host had just put up, tearing the scoring
+  buttons off screen. `playClip` has one caller, the waiting-phase Play button,
+  so a resolution landing in any other phase is now refused outright. The
+  repair path takes the same guard, and **Quit** now ends the round properly —
+  quitting during "Finding audio…" used to leave the clip playing over the setup
+  page with nothing able to stop it, because the element the pause went through
+  had already been unmounted.
+
+- **A tribute act is no longer counted as the artist it is imitating**
+  (`lib/preview-cache.ts`). `artistMatches` tested whole-token containment, so
+  `"Hello Adele Tribute"` read as Adele — and that credit is the *second* result
+  the live iTunes API returns for "Hello Adele". A tribute recording carrying
+  the exact title therefore landed in the strongest tier and won on running
+  time. Credits are now split into the acts they name (`&`, `,`, `feat`, `with`,
+  `x`, …) and one has to name every act the other does. `"Marshmello & Noah
+  Cyrus"` still matches Marshmello; `"The Beatles"` still matches `"Beatles"`.
+  Recorded as a known gap since 1.2.0.
+
+- **A remaster keeps its own recording instead of being left to the clock.**
+  Spotify stores `"Karma Police - Remastered 2011"`; iTunes returns the same
+  recording as plain `"Karma Police"`. Exact comparison matched neither, the
+  pick fell through to the artist tier, and running time alone cannot tell a
+  remaster from the album track beside it — it resolved to *Lucky*. A
+  qualifier-stripped title tier now sits between "same artist and title" and
+  "same artist".
+
+- **An artist-less lookup is held to the running time.** With no artist the
+  query degrades to the bare title and the guarded follow-up is skipped as a
+  duplicate, which quietly left the *unguarded* half as the only thing that ran:
+  a title-only search taking upstream's best-ranked answer with nothing tying it
+  to the request, cached as `found` for a year. It now demands the clock when
+  the caller sent one, and is unchanged when they sent neither.
+
+### Changed
+
+- **Both preview routes clamp `track` and `artist`** (`PREVIEW_FIELD_MAX`, 300).
+  The matching above is regex work on strings that arrive straight off the wire
+  from an unauthenticated caller, and two of those regexes are super-linear on
+  pathological input — 16k spaces measured at 141ms in a single credit split,
+  once per candidate per tier. Spotify's own fields are far under the cap.
+  Clamped by code point rather than `slice`, because half a surrogate pair makes
+  `encodeURIComponent` throw and that throw is inside the batch's `Promise.all`.
+- `pickCandidate` judges each candidate once and the tiers read the verdicts.
+  The tier loop re-filters per tier and the same questions appear in several
+  tiers, so upstream's strings were being re-parsed for answers that cannot
+  change — up to ~150 redundant credit splits per track on the hottest path in
+  the app. Behaviour is identical; `tests/preview.test.ts` covers the ordering.
+
+### Known gaps
+
+- **Entries written by the old picker are still served.** Positive results are
+  held a year under an unversioned key, and `&refresh=1` re-confirms the stored
+  `itunesTrackId` rather than re-picking, so this release reaches only tracks
+  nobody has played yet. Worse for this particular bug: a wrong-but-playable URL
+  never fires the `<audio>` error that triggers refresh at all. Re-picking them
+  needs the picker-generation stamp described at `lib/preview-cache.ts:127`, and
+  its admission budget, which is not built.
+- **The round guard is tested; its wiring is not.** The rule moved to
+  `lib/round-token.ts` for the reason `lib/room-poll.ts` and `lib/song-count.ts`
+  did — the suite reaches `lib/` and cannot import a `.tsx` module — and
+  `begin()` hands back its own comparison so the two halves cannot be written
+  apart. What no test can still reach is whether the component *calls* it:
+  `retireRound()` is the single teardown, but a fifth round-ending path that
+  forgets it would fail silently.
+- **CJK is one signal deep.** For 小幸運 / 田馥甄 the live API translates *both*
+  the title and the credit, so running time is the only thing left and the
+  correct track sits 768ms from a sibling. It picks correctly today because the
+  right recording matches almost exactly, but nothing else is holding it up.
+
 ## [1.7.4] - 2026-08-24
 
 A host wrote in: the site loads, they paste a playlist, they press Start, and
