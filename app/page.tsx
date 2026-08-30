@@ -90,11 +90,15 @@ async function settleWithConcurrency<T, R>(
 
 // Rendered on the page *and* emitted as FAQPage JSON-LD below — keep the two
 // in sync, Google penalises schema that doesn't match visible content.
-// The three guides linked from the homepage. Resolved through getGuide rather
-// than retyped so the titles here cannot drift from the articles themselves;
-// filtered so a retired slug costs a card instead of crashing the homepage.
+// The handful of guides linked from the homepage. Resolved through getGuide
+// rather than retyped so the titles here cannot drift from the articles
+// themselves; filtered so a retired slug costs a card instead of crashing the
+// homepage. This is also the only inbound link a new guide gets from the
+// highest-authority page on the site, which is what gets it crawled — so a
+// newly published article is worth putting here for a while.
 const HOME_GUIDES = [
   "how-to-host-a-music-quiz-night",
+  "guess-the-song-game-rules",
   "best-playlists-for-a-guess-the-song-game",
   "spotify-playlist-not-working",
 ]
@@ -1411,9 +1415,11 @@ export default function SetupPage() {
             </div>
           </section>
 
-          {/* Three of the guides, not all eight — this is a teaser under a form,
-              not a second index. HOME_GUIDES names which three; the copy comes
-              from lib/guides.ts so a retitled guide is retitled here too. */}
+          {/* A few of the guides, deliberately not all of them — this is a
+              teaser under a form, not a second index. HOME_GUIDES names which;
+              the copy comes from lib/guides.ts so a retitled guide is retitled
+              here too. (The count used to be written into this comment, and it
+              went stale the first time a guide was added.) */}
           <section className="seo-section">
             <h2 className="seo-h2">Guides</h2>
             <p className="seo-p">
