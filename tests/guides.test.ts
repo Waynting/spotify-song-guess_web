@@ -114,6 +114,38 @@ describe("guides index", () => {
   });
 });
 
+describe("homepage guide teaser", () => {
+  // app/page.tsx picks a few slugs by hand and resolves them through getGuide,
+  // filtering out anything that does not resolve. That filter is deliberate —
+  // a retired guide should cost a card rather than crash the homepage — but it
+  // makes a *typo* silent in exactly the same way, and the homepage is the one
+  // inbound link that reliably gets a new guide crawled. Read as source text
+  // because the suite cannot import a .tsx module here; same technique as
+  // "wires each page to its own slug" above.
+  const source = readFileSync(join(process.cwd(), "app/page.tsx"), "utf8");
+
+  function homeGuideSlugs(): string[] {
+    const match = source.match(/const HOME_GUIDES = \[([\s\S]*?)\]/);
+    expect(match, "HOME_GUIDES array not found in app/page.tsx").toBeTruthy();
+    return Array.from(match![1].matchAll(/"([^"]+)"/g)).map((m) => m[1]);
+  }
+
+  it("names at least one guide", () => {
+    expect(homeGuideSlugs().length).toBeGreaterThan(0);
+  });
+
+  it("resolves every slug it names", () => {
+    for (const slug of homeGuideSlugs()) {
+      expect(getGuide(slug), `app/page.tsx links to unknown guide "${slug}"`).toBeDefined();
+    }
+  });
+
+  it("names each guide at most once", () => {
+    const slugs = homeGuideSlugs();
+    expect(new Set(slugs).size, "a guide is listed twice on the homepage").toBe(slugs.length);
+  });
+});
+
 describe("guide lookups", () => {
   // The happy paths are covered above by the directory/slug joins. These are
   // the branches those never reach — the ones that only run once a guide is
