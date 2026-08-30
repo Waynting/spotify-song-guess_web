@@ -5,6 +5,96 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-08-30
+
+AdSense refused the site a second time under **缺乏價值的內容** (Low value
+content) — the same code as 2026-08-21, now with the 1.7.0 compliance work
+already live. So compliance was never the gap.
+
+What the live site actually looks like to a reviewer was measured rather than
+assumed: 17 indexable URLs, guides rendering 1,130–1,480 words each, policy
+pages linked from `components/site-footer.tsx` on every page, `ads.txt`
+agreeing with `NEXT_PUBLIC_ADSENSE_CLIENT_ID`, canonicals and `Article`
+JSON-LD present, nothing content-shaped in `app/robots.ts`. All of that is
+fine and none of it was worth redoing.
+
+The gap is **editorial volume**, and the benchmark that matters is the one for
+tool and utility sites rather than for blogs: a tool site is expected to carry
+its own supporting library, because a reviewer samples the tool page and will
+not accept UI as the site. Eight articles sits below that band. Fourteen is
+inside it.
+
+### Added
+
+- **Six guides, taking `lib/guides.ts` from eight to fourteen.** Each is
+  1,045–1,373 words of source prose and declared once, as the module's header
+  requires — the route, the `/guides` index, `app/sitemap.ts` and the sibling
+  "read next" links all derive from the entry rather than being hand-synced.
+
+  | Slug | Category |
+  |---|---|
+  | `guess-the-song-game-rules` | Playing |
+  | `music-quiz-round-ideas` | Hosting |
+  | `music-quiz-over-video-call` | Hosting |
+  | `music-quiz-for-large-groups` | Hosting |
+  | `songs-with-no-preview-clip` | Troubleshooting |
+  | `music-quiz-licensing-and-previews` | Troubleshooting |
+
+  Two of them are the ones this project can write and nobody else can.
+  `songs-with-no-preview-clip` is `lib/preview-cache.ts`'s hazard list turned
+  outward — the remaster suffix, the differently-credited artist, the rotated
+  CDN URL, and the `absent`/`unavailable` collapse that marked a slice of the
+  catalogue silent for a week — written for the host who sees one quiet track
+  and assumes a bug. `music-quiz-over-video-call` is the audio problem stated
+  properly: voice processing dismantles music by design, and network delay
+  makes first-to-answer a measurement of connection quality, which retires the
+  base game's central rule rather than merely inconveniencing it. That is what
+  "information gain" has to mean here; eight more listicles would have been
+  the thin filler the rejection is about.
+
+### Changed
+
+- **The eight existing guides' `related` arrays were rewired so every new
+  article has an inbound link from an established one**, not only from its
+  five siblings. `tests/guides.test.ts` asserts each guide has *an* inbound
+  link, which the six would have satisfied by pointing at each other — and
+  that is exactly the shape Google reaches last. The rewiring keeps the count
+  at three per guide, so nothing about the rendered block changes.
+- **`HOME_GUIDES` in `app/page.tsx` takes a fourth slot**, and the comment now
+  says why: the homepage is the highest-authority page on the site and the
+  only inbound link that reliably gets a new article crawled. The count was
+  previously written into the comment beside it ("not all eight"), which went
+  stale the moment a guide was added — it is stated as a rule now instead of a
+  number.
+- **`tests/guides.test.ts` now pins that list too.** Nothing covered it, and
+  its `.filter(Boolean)` makes a typo indistinguishable from a deliberately
+  retired guide: the card just stops rendering. That is the silent-drift class
+  every other assertion in the file exists to catch, on the one link that gets
+  a new article crawled. Read as source text, because the suite cannot import
+  a `.tsx` module here — the same technique the "wires each page to its own
+  slug" assertion already uses.
+
+### Known gaps
+
+- **The re-review is still filed by hand**, and this is the second time that
+  has been the last mile. AdSense allows a limited number of appeals before
+  the cooldown between them lengthens, so this one should not be spent early:
+  the research is consistent that publishing and applying the same day is its
+  own failure, and the 1.7.0 appeal was filed against pages Google had barely
+  seen. Give the six articles two weeks to be crawled — confirm in Search
+  Console that they are indexed, not merely submitted — and file after that.
+- **A `site:guessong.app` query on 2026-08-30 returned only `/` and `/about`.**
+  Search-API `site:` results are not authoritative and this is not proof the
+  guides are unindexed, but it is the one signal that would explain a refusal
+  of a site whose content is genuinely there. Search Console's Pages report is
+  the instrument that answers it, and it is the thing to open before appealing
+  again.
+- **The tool page itself was left alone.** The tool-site guidance is explicit
+  that reviewers sample it directly and that UI-only pages sink an application;
+  `/` currently renders ~750 words plus an FAQ, which is adequate rather than
+  strong. If a third refusal arrives with fourteen indexed guides behind it,
+  the homepage is the next lever, not more articles.
+
 ## [1.7.5] - 2026-08-25
 
 A player wrote in: *"it was playing the wrong audio for my playlist."*

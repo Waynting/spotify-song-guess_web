@@ -49,6 +49,46 @@ export interface ChangelogEntry {
 
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: "1.8.0",
+    date: "2026-08-30",
+    headline:
+      "Six new guides — quiz round ideas, running one for a big group, playing over a video call, and what to do when a single song has no clip.",
+    headlineZh:
+      "新增六篇指南：各種猜歌回合的玩法、人多的時候怎麼帶、用視訊通話怎麼玩，還有某一首歌播不出聲音時該怎麼辦。",
+    changes: [
+      {
+        kind: "new",
+        text: "Twelve music quiz round formats, sorted by what each one does to a room — which ones let a quieter player win, and where each belongs in a running order.",
+        textZh: "十二種猜歌回合的玩法，照「會讓現場氣氛怎麼變」來分類：哪一種能讓比較安靜的人有機會贏，還有整晚的順序怎麼排。",
+      },
+      {
+        kind: "new",
+        text: "A guide to running a quiz for twenty people or more: the three things that break at that size, and why teams fix all of them at once.",
+        textZh: "一篇專門講二十人以上怎麼玩的指南：人一多會壞掉的三件事，以及為什麼分組一次就能解決全部。",
+      },
+      {
+        kind: "new",
+        text: "How to run one over Zoom, Meet or Discord — the exact audio setting to turn on for each, and the one rule you have to drop because everyone hears the clip at a different moment.",
+        textZh: "怎麼用 Zoom、Meet 或 Discord 玩：每個平台要打開哪個聲音設定，還有一條一定要放棄的規則，因為每個人聽到片段的時間都不一樣。",
+      },
+      {
+        kind: "new",
+        text: "Why one song can be silent when the rest of the playlist plays fine, and how to tell a genuine catalogue gap from us being temporarily rate limited.",
+        textZh: "為什麼歌單其他歌都正常，卻只有一首沒有聲音；以及怎麼分辨是那首歌真的找不到片段，還是我們暫時被對方限流了。",
+      },
+      {
+        kind: "new",
+        text: "The rules of guess the song written out properly, with nine variants and the four house rules worth agreeing before you start.",
+        textZh: "把猜歌遊戲的規則好好寫了一遍，附九種變化玩法，還有開場前值得先講好的四條自訂規則。",
+      },
+      {
+        kind: "new",
+        text: "A plain-language look at music licensing for quiz nights: when it applies, who normally already holds the licence, and what a thirty-second preview clip does and does not cover.",
+        textZh: "用白話講猜歌之夜的音樂授權：什麼情況下才需要、通常是場地方早就處理好了，以及三十秒試聽片段涵蓋與不涵蓋的範圍。",
+      },
+    ],
+  },
+  {
     version: "1.7.5",
     date: "2026-08-25",
     headline:
