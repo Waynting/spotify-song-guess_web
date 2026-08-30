@@ -55,9 +55,9 @@ export const GUIDES: Guide[] = [
     published: "2026-08-21",
     minutes: 8,
     related: [
+      "music-quiz-round-ideas",
       "music-quiz-scoring-rules",
       "best-playlists-for-a-guess-the-song-game",
-      "clip-length-and-difficulty",
     ],
   },
   {
@@ -72,7 +72,7 @@ export const GUIDES: Guide[] = [
     minutes: 7,
     related: [
       "clip-length-and-difficulty",
-      "how-to-host-a-music-quiz-night",
+      "guess-the-song-game-rules",
       "spotify-playlist-not-working",
     ],
   },
@@ -88,8 +88,8 @@ export const GUIDES: Guide[] = [
     minutes: 6,
     related: [
       "music-quiz-scoring-rules",
+      "guess-the-song-game-rules",
       "best-playlists-for-a-guess-the-song-game",
-      "how-to-host-a-music-quiz-night",
     ],
   },
   {
@@ -103,9 +103,9 @@ export const GUIDES: Guide[] = [
     published: "2026-08-21",
     minutes: 7,
     related: [
+      "guess-the-song-game-rules",
       "how-to-host-a-music-quiz-night",
       "clip-length-and-difficulty",
-      "mixed-playlist-mode-guide",
     ],
   },
   {
@@ -119,8 +119,8 @@ export const GUIDES: Guide[] = [
     published: "2026-08-21",
     minutes: 7,
     related: [
+      "music-quiz-for-large-groups",
       "music-quiz-scoring-rules",
-      "how-to-host-a-music-quiz-night",
       "party-games-for-small-groups",
     ],
   },
@@ -135,9 +135,9 @@ export const GUIDES: Guide[] = [
     published: "2026-08-21",
     minutes: 7,
     related: [
+      "songs-with-no-preview-clip",
       "why-spotify-previews-disappeared",
       "best-playlists-for-a-guess-the-song-game",
-      "how-to-host-a-music-quiz-night",
     ],
   },
   {
@@ -151,9 +151,9 @@ export const GUIDES: Guide[] = [
     published: "2026-08-21",
     minutes: 8,
     related: [
+      "songs-with-no-preview-clip",
+      "music-quiz-licensing-and-previews",
       "spotify-playlist-not-working",
-      "best-playlists-for-a-guess-the-song-game",
-      "clip-length-and-difficulty",
     ],
   },
   {
@@ -167,9 +167,105 @@ export const GUIDES: Guide[] = [
     published: "2026-08-21",
     minutes: 7,
     related: [
+      "music-quiz-for-large-groups",
       "how-to-host-a-music-quiz-night",
       "mixed-playlist-mode-guide",
+    ],
+  },
+  {
+    slug: "guess-the-song-game-rules",
+    title: "Guess the Song: The Rules, and Nine Variants Worth Knowing",
+    navTitle: "Guess the song: rules and variants",
+    description:
+      "The base rules of a guess the song game written out properly, nine variants that each change one thing about it, and the four house rules that stop the arguments before they start.",
+    lede: "Every argument at a quiz night is really about one of three questions: who may answer, when, and what counts as an answer.",
+    category: "Playing",
+    published: "2026-08-30",
+    minutes: 8,
+    related: [
       "music-quiz-scoring-rules",
+      "clip-length-and-difficulty",
+      "music-quiz-round-ideas",
+    ],
+  },
+  {
+    slug: "music-quiz-round-ideas",
+    title: "Twelve Music Quiz Rounds That Are Not “Name That Tune”",
+    navTitle: "Music quiz round ideas",
+    description:
+      "Twelve rounds that need nothing but a playlist and a host, sorted by what they do to a room: what each one tests, who it lets win, and where it belongs in a running order.",
+    lede: "A quiz made entirely of name-that-tune rounds is one round played eight times. It works for about twenty-five minutes.",
+    category: "Hosting",
+    published: "2026-08-30",
+    minutes: 7,
+    related: [
+      "how-to-host-a-music-quiz-night",
+      "guess-the-song-game-rules",
+      "music-quiz-for-large-groups",
+    ],
+  },
+  {
+    slug: "music-quiz-over-video-call",
+    title: "Running a Music Quiz Over Zoom, Meet or Discord",
+    navTitle: "Music quiz over video call",
+    description:
+      "Why music sounds destroyed over a video call, the exact setting to enable on each platform, and the one rule of the in-person game that has to be thrown away because audio delay makes it meaningless.",
+    lede: "A remote music quiz fails in a specific, predictable way, and it is almost never the quiz’s fault. It is the audio.",
+    category: "Hosting",
+    published: "2026-08-30",
+    minutes: 6,
+    related: [
+      "how-to-host-a-music-quiz-night",
+      "songs-with-no-preview-clip",
+      "music-quiz-round-ideas",
+    ],
+  },
+  {
+    slug: "music-quiz-for-large-groups",
+    title: "Running a Music Quiz for Twenty People or More",
+    navTitle: "Music quiz for large groups",
+    description:
+      "A quiz built for eight does not scale to thirty by adding chairs. The three things that break at size, why teams fix all of them at once, and which rounds survive a crowd.",
+    lede: "At twenty-five people the same six confident players take everything and the rest are an audience. That is structural, not a matter of trying harder.",
+    category: "Hosting",
+    published: "2026-08-30",
+    minutes: 7,
+    related: [
+      "how-to-host-a-music-quiz-night",
+      "party-games-for-small-groups",
+      "music-quiz-scoring-rules",
+    ],
+  },
+  {
+    slug: "songs-with-no-preview-clip",
+    title: "Why One Song Has No Clip When the Rest of the Playlist Does",
+    navTitle: "When a song has no clip",
+    description:
+      "Five reasons a single track goes silent in a Spotify-based music game — remaster suffixes, differently credited artists, rotated URLs, catalogue gaps and throttling — and how to tell which one you are looking at.",
+    lede: "Forty-nine songs play and one is silent. It looks like a bug, and it is usually a structural fact about where preview clips come from.",
+    category: "Troubleshooting",
+    published: "2026-08-30",
+    minutes: 6,
+    related: [
+      "why-spotify-previews-disappeared",
+      "spotify-playlist-not-working",
+      "best-playlists-for-a-guess-the-song-game",
+    ],
+  },
+  {
+    slug: "music-quiz-licensing-and-previews",
+    title: "Music Licensing and Quiz Nights: What Actually Applies",
+    navTitle: "Licensing and quiz nights",
+    description:
+      "The three separate questions people collapse into one: whether it is a public performance, who already holds the licence, and what a thirty-second preview clip does and does not permit.",
+    lede: "Nobody running a quiz in their living room needs this page. Anyone running one in a pub, a school or a hired hall probably does.",
+    category: "Troubleshooting",
+    published: "2026-08-30",
+    minutes: 6,
+    related: [
+      "why-spotify-previews-disappeared",
+      "music-quiz-over-video-call",
+      "how-to-host-a-music-quiz-night",
     ],
   },
 ];
